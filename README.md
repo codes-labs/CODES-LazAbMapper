@@ -1,7 +1,7 @@
 # LAMapperApp
 
 ## Overview
-LAMapperApp is a Shiny application designed for data visualization and analysis in the field of mineralogy. It provides various tools for mapping, classification, and statistical analysis of mineral data.
+LAMapperApp is an interactive Shiny application designed for displaying and interrogating LA-ICP-MS maps. It provides various tools for mapping, mineral classification, and statistical analysis geochemical data.
 
 ## Project Structure
 ```
