@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import matplotlib
-matplotlib.use("QtAgg")
+# matplotlib.use("QtAgg")
 import matplotlib.pyplot as plt
 from matplotlib import colors
 plt.style.use('bmh')
