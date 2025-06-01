@@ -34,7 +34,20 @@ import pyarrow.parquet as pq # type: ignore
 from shiny._main import run_app
 from shinywidgets import output_widget, render_widget  
 import plotly # type: ignore
+import plotly.express as px
 import plotly.graph_objects as go # type: ignore
+from plotly.graph_objs import Figure
+from shiny.types import ImgData
+from skimage import io
+import cmcrameri.cm as cmc # type: ignore
+from PIL import Image
+import json
+import io
+import seaborn as sns
+import matplotlib.transforms as transforms # type: ignore
+from matplotlib.patches import Ellipse # type: ignore
+import numpy.ma as ma # type: ignore
+
 # from shiny.types import ImgData
 
 def return_cm_data():
@@ -298,7 +311,31 @@ def return_cm_data():
     return cm_data
 cm_data = return_cm_data()
 parula_map = LinearSegmentedColormap.from_list('parula', cm_data)
-matplotlib.cm.register_cmap(name="parula", cmap=parula_map)
+matplotlib.colormaps.register(name="parula", cmap=parula_map)
+
+def mpl_to_plotly(cmap, pl_entries=255):
+    h = np.linspace(0, 1, pl_entries)
+    colors = cmap(h)[:, :3]
+    return [[round(v, 2), f'rgb({",".join([str(int(c*255)) for c in color])})'] for v, color in zip(h, colors)]
+
+batlow_plotly = mpl_to_plotly(cmc.batlow, pl_entries=255)
+
+# named_colorscales = px.colors.named_colorscales()
+
+# parula_cmap = matplotlib.cm.get_cmap('parula')
+# parula_rgb = []
+# norm = matplotlib.colors.Normalize(vmin=0, vmax=255)
+# for i in range(0, 255):
+#     k = matplotlib.colors.colorConverter.to_rgb(parula_cmap(norm(i)))
+#     parula_rgb.append(k)
+# def matplotlib_to_plotly(cmap, pl_entries):
+#     h = 1.0/(pl_entries-1)
+#     pl_colorscale = []
+#     for k in range(pl_entries):
+#         C = map(np.uint8, np.array(cmap(k*h)[:3])*255)
+#         pl_colorscale.append([k*h, 'rgb'+str((C[0], C[1], C[2]))])
+#     return pl_colorscale
+# parula = matplotlib_to_plotly(parula_rgb, 255)
 
 
 elements_all = ['23Na','24Mg','27Al','29Si','31P','34S','35Cl','39K','43Ca','44Ca','45Sc','49Ti','51V','53Cr','55Mn','56Fe','57Fe',
@@ -307,7 +344,7 @@ elements_all = ['23Na','24Mg','27Al','29Si','31P','34S','35Cl','39K','43Ca','44C
                 '141Pr','146Nd','147Sm','153Eu','157Gd','159Tb','163Dy','165Ho','166Er','169Tm','172Yb','175Lu','178Hf','181Ta','182W',
                 '185Re','189Os','195Pt','197Au','202Hg','203Tl','205Tl','206Pb','207Pb','208Pb','209Bi','232Th','238U']
 
-cmaps = ["parula", "inferno", "plasma", "viridis", "nipy_spectral", "Reds", "Greens", "Blues"]
+cmaps = ["cmc.batlow", "parula", "inferno", "plasma", "viridis", "nipy_spectral", "Reds", "Greens", "Blues"]
 
 
 def channelnorm(im, channel, vmin, vmax):
@@ -316,11 +353,40 @@ def channelnorm(im, channel, vmin, vmax):
     c[c<0.] = 0
     c[c>1.] = 1
     im_copy[:,:,channel] = c
-    return im_copy 
-                        
+    return im_copy
+
+def confidence_ellipse(x, y, ax, n_std=0.1, facecolor='none', **kwargs):
+    # Convert to arrays and flatten
+    x = np.asarray(x).flatten()
+    y = np.asarray(y).flatten()
+    # Mask invalid (NaN) values in both x and y
+    valid = ~np.isnan(x) & ~np.isnan(y)
+    x = x[valid]
+    y = y[valid]
+    if x.size == 0 or y.size == 0:
+        print("No valid data for confidence ellipse.")
+        return Ellipse((0, 0), width=0, height=0, facecolor=facecolor, **kwargs)
+    if x.size != y.size:
+        raise ValueError("x and y must be the same size")
+    cov = np.cov(x, y)
+    pearson = cov[0, 1]/np.sqrt(cov[0, 0] * cov[1, 1])
+    ell_radius_x = np.sqrt(1 + pearson)
+    ell_radius_y = np.sqrt(1 - pearson)
+    ellipse = Ellipse((0, 0), width=ell_radius_x * 2, height=ell_radius_y * 2,
+                      facecolor=facecolor, **kwargs)
+    scale_x = np.sqrt(cov[0, 0]) * n_std
+    mean_x = np.nanmean(x)
+    scale_y = np.sqrt(cov[1, 1]) * n_std
+    mean_y = np.nanmean(y)
+    transf = transforms.Affine2D() \
+        .rotate_deg(45) \
+        .scale(scale_x, scale_y) \
+        .translate(mean_x, mean_y)
+    ellipse.set_transform(transf + ax.transData)
+    return ax.add_patch(ellipse)                    
 
 
-app_ui = ui.page_fluid(
+app_ui = ui.page_fluid("CODES Laser Ablation Mapper v 0.1.0",
     ui.navset_tab(
         ui.nav_panel("Load Data",
                      ui.page_sidebar(
@@ -336,7 +402,7 @@ app_ui = ui.page_fluid(
                             ui.input_select("aspect_ratio", "Select an aspect ratio option", choices=["Input aspect ratio", "Calculate aspect ratio"]),
                             ui.input_numeric("pixel_aspect", "Pixel Aspect Ratio", 1.0),
                             ui.input_numeric("scan_speed", "Scan speed (μm/s)", 9.0),
-                            ui.input_numeric("sweep_time", "Total sweep time (ms) (323 for pyrite)", 323),
+                            ui.input_numeric("sweep_time", "Total sweep time (ms) (343 for pyrite)", 343),
                             ),
                         ui.output_text("done_text", inline=True),
                     ),
@@ -348,10 +414,6 @@ app_ui = ui.page_fluid(
                          ui.sidebar(
                              # ui.input_select("calc_type", "Select a calculation type", choices=["Total and Entropy", "Normal Calculation"]),
                              ui.accordion(
-                                ui.accordion_panel("Entropy Calculation",
-                                    ui.input_select("elem_4_entropy", "Select the elements to use for the total and entropy cacluations", choices=elements_all, multiple=True),
-                                    ui.input_action_button("calc_entropy_map", "Calculate and Plot Shannon Entropy"),
-                                    ),
                                 ui.accordion_panel("Normal Calculation",
                                     # ui.input_select("masked_map_calc", "Select mineral to use", choices=["All"]),
                                     ui.input_select("element_1", "Select Element 1", choices=elements_all),
@@ -362,13 +424,18 @@ app_ui = ui.page_fluid(
                                     ui.input_select("c_map_calc", "Select color map", choices=cmaps),
                                     ui.input_action_button("disp_calc_mat", "Click to display Caculated Map"),
                                     ui.input_action_button("add_calc_mat", "Click to add calculated map to globals"),
-                                    ),
+                                    ), 
+                                ui.accordion_panel("Entropy Calculation",
+                                    ui.input_select("elem_4_entropy", "Select the elements to use for the total and entropy cacluations", choices=elements_all, multiple=True),
+                                    ui.input_action_button("calc_entropy_map", "Calculate and Plot Shannon Entropy"),
+                                    ),                                
                              id="calc_accordion",
                              )
                          ),
-                         ui.output_plot("plot_entropy_map"),
                          ui.output_plot("calc_plot"),
                          ui.output_text("added_calc"),
+                         ui.output_plot("plot_entropy_map"),
+                         
                      )
             ),
 
@@ -419,13 +486,14 @@ app_ui = ui.page_fluid(
                                         ),
                                     id="classification_accordion",
                                     ),
+                                ui.download_button("download_min_means", "Download Mineral Means"),
                                 ),
                             ui.input_action_button("classify_minerals", "Click to Perform Classification"),
                             ui.output_plot("plot_mineral_class"),
                             ui.div(
                                 ui.output_table("mineral_class_table"),
                                 style="overflow-x: auto; white-space: nowrap;"  # Add horizontal scrolling
-                                )
+                                ),
                             )
                      ),
 
@@ -433,13 +501,15 @@ app_ui = ui.page_fluid(
                      ui.page_sidebar(
                          ui.sidebar(
                              ui.input_numeric("row_number","Row Number for Line Plot", 0),
-                             ui.input_numeric("col_min", "Enter the minimum column index", 0),
-                             ui.input_numeric("col_max", "Enter the maximum column index", -1),
+                             # ui.input_numeric("col_min", "Enter the minimum column index", 0),
+                             # ui.input_numeric("col_max", "Enter the maximum column index", -1),
                              ui.input_action_button("perf_yield_cor", "Apply Yield Correction"),
                              ui.input_checkbox("use_cor_mats", "Use yield corrected values for all maps?", value=False),                             
+                             ui.download_button("download_yc_means", "Download Yield Corrected Means"),
                             ),
                          ui.output_plot("yield_cor_plot"),
                          ui.output_plot("plot_max_percent"),
+                         ui.output_plot("ycf_plot"),
                          ui.div(
                                 ui.output_table("apply_yield_cor"),
                                 style="overflow-x: auto; white-space: nowrap;"  # Add horizontal scrolling
@@ -448,22 +518,41 @@ app_ui = ui.page_fluid(
                      ),
 
 
+        # ui.nav_panel("Single Map", 
+        #            ui.page_sidebar(
+        #                ui.sidebar(
+        #                    ui.input_select("masked_map", "Select mineral to show", choices=["All"], selected=["All"], multiple=True),
+        #                    ui.input_select("element", "Select Element", choices=elements_all),
+        #                    ui.input_checkbox("use_log", "Log Scale?", value=False),
+        #                    ui.input_select("c_map", "Select color map", choices=cmaps),
+        #                    ui.input_slider("min_max_vals", "Color Percentile", 0,100, value= [1,99], step=0.1),
+        #                    ui.input_numeric("colorbar_fract", "Colorbar size fraction", 0.1),
+        #                    # ui.input_slider("max_val", "Maximum Percentile", 0,100, 99, step=0.1),
+        #                    ui.input_text("colorbar_label", "Units:"),
+        #                    ui.input_action_button("save_fig", "Save Figure"),
+        #                    ),
+        #                 ui.output_plot("plot", width="1000px", height="1000px"),
+        #                 ui.output_text("save_figure"),
+        #             )
+        #            ),
+
         ui.nav_panel("Single Map", 
                    ui.page_sidebar(
                        ui.sidebar(
                            ui.input_select("masked_map", "Select mineral to show", choices=["All"], selected=["All"], multiple=True),
                            ui.input_select("element", "Select Element", choices=elements_all),
                            ui.input_checkbox("use_log", "Log Scale?", value=False),
-                           ui.input_select("c_map", "Select color map", choices=cmaps),
+                           ui.input_select("c_map", "Select color map", choices=["batlow"] + px.colors.named_colorscales(), selected="batlow"),
                            ui.input_slider("min_max_vals", "Color Percentile", 0,100, value= [1,99], step=0.1),
-                           # ui.input_slider("max_val", "Maximum Percentile", 0,100, 99, step=0.1),
-                           ui.input_text("colorbar_label", "Units:"),
-                           ui.input_action_button("save_fig", "Save Figure"),
+                        #    ui.input_numeric("colorbar_fract", "Colorbar size fraction", 0.1),
+                        #    # ui.input_slider("max_val", "Maximum Percentile", 0,100, 99, step=0.1),
+                        #    ui.input_text("colorbar_label", "Units:"),
+                        #    ui.input_action_button("save_fig", "Save Figure"),
                            ),
-                        ui.output_plot("plot"),
-                        ui.output_text("save_figure"),
+                        output_widget("plot"),
                     )
                    ),
+
 
 
         ui.nav_panel("RGB Map", 
@@ -481,10 +570,11 @@ app_ui = ui.page_fluid(
                            # ui.input_select("cmap_ch3", "Select a Color for Ch 3", choices=cmaps, selected="Blues"),
                            ui.input_select("element_blue", "Select element for blue channel", choices=elements_all),
                            ui.input_slider("min_max_vals_blue", "Percentile Range Blue", 0,100, [1,99], step=0.1),
-                           ui.input_action_button("save_fig_rgb", "Save Figure"),
+                           # ui.input_action_button("save_fig_rgb", "Save Figure"),
                            ),
-                        ui.output_plot("plot_rgb"),
-                        ui.output_text("save_figure_rgb")
+                        output_widget("plot_rgb"),
+                        # ui.input_numeric("rgb_legend_size", value=300),
+                        output_widget("rgb_legend", width="500px", height="500px"),
                         )
                    ),
 
@@ -505,87 +595,149 @@ app_ui = ui.page_fluid(
                             ui.input_action_button("disp_multi_plot", "Display Plot"),
                             ), 
                         ui.output_text("plot_multi"),
-                        ui.output_plot("plot_multi_disp")
+                        ui.output_image("plot_multi_disp")
                     ),
                    
                 ),
 
-        ui.nav_panel("ROI Selector", 
+
+        ui.nav_panel("ROI Selector",
                      ui.page_sidebar(
-                        ui.sidebar(
-                            ui.input_select("roi_type", "Select ROI type", choices=["Rectangle", "Polygon"]),
-                            ui.input_select("masked_map_roi", "Select mineral for masking", choices=["All"]),
-                            ui.input_select("element_roi", "Select Element for ROI Selections", choices=elements_all),
-                            ui.input_action_button("make_roi_table", "Select ROI(s) from Map"),
-                            ui.input_action_button("plot_rois", "Show Map with ROIs"),                            
-                            ui.input_action_button("show_roi_means", "Show ROI Means"),                            
-                            ui.input_action_button("roi_to_globals", "Add ROIs to Globals"),                            
+                         ui.sidebar(
+                            # ui.h2("Draw a Box to Select Pixels"),
+                            ui.input_select("element_plotly", "Select element", choices=elements_all),
+                            ui.input_slider("min_max_vals_roi", "Color Percentile", 0,100, value= [1,99], step=0.1),
+                            ui.input_select("plotly_colorscale", "Choose color map", choices=["batlow"] + px.colors.named_colorscales(), selected="batlow"),
+                            ui.input_select("plotly_tool", "Selection Tool:", choices=["rectangle", "lasso"], selected="rectangle"),
+                            # ui.input_action_button("btn", "Show shape info"),
+                            ui.download_button("download_ROI_means", "Download ROI Means"),
+                            ui.input_action_button("show_roi_means", "Show ROI Means"), 
+                            ui.input_action_button("roi_to_globals", "Add ROIs to Globals"),
                             ),
-                        # ui.output_text("roi_intro"),
-                        ui.markdown("""
-                                    ### ROI Selector
-                                    Use this tool to select regions of interest (ROIs) from your map.
-                                    1. Choose the ROI type (Rectangle or Polygon).
-                                    2. Select the mineral and element for ROI selections.
-                                    3. Click "Select ROI(s) from Map" and a new window will pop up. Start drawing.
-                                    4. Close the window to quit.
-                                    """),
-                        ui.div(
-                                ui.output_table("roi_table"),
-                                style="overflow-x: auto; white-space: nowrap;"  # Add horizontal scrolling
-                                ),
-                        ui.output_plot("plot_roi"),
+                            # ui.output_plotly("image_plot", width="600px", height="600px"),
+                        output_widget("image_plot", width="1000px", height="400px"),
+                        # ui.output_text("print_coords"),
+                        # ui.output_text("dump"),
+                        ui.output_data_frame("selected_pixels"), 
                         ui.output_plot("plot_roi_means"),
-                        ui.output_text("roi_to_globals_text"),
-                        ),
-                    ),
+                         )
+                     ),
+
+        # ui.nav_panel("ROI Selector", 
+        #              ui.page_sidebar(
+        #                 ui.sidebar(
+        #                     ui.input_select("roi_type", "Select ROI type", choices=["Rectangle", "Polygon"]),
+        #                     ui.input_select("masked_map_roi", "Select mineral for masking", choices=["All"]),
+        #                     ui.input_select("element_roi", "Select Element for ROI Selections", choices=elements_all),
+        #                     ui.input_action_button("make_roi_table", "Select ROI(s) from Map"),
+        #                     ui.input_action_button("plot_rois", "Show Map with ROIs"),                            
+        #                     # ui.input_action_button("show_roi_means", "Show ROI Means"),                            
+        #                     # ui.input_action_button("roi_to_globals", "Add ROIs to Globals"),                            
+        #                     ),
+        #                 # ui.output_text("roi_intro"),
+        #                 ui.markdown("""
+        #                             ### ROI Selector
+        #                             Use this tool to select regions of interest (ROIs) from your map.
+        #                             1. Choose the ROI type (Rectangle or Polygon).
+        #                             2. Select the mineral and element for ROI selections.
+        #                             3. Click "Select ROI(s) from Map" and a new window will pop up. Start drawing.
+        #                             4. Close the window to quit.
+        #                             """),
+        #                 ui.div(
+        #                         ui.output_table("roi_table"),
+        #                         style="overflow-x: auto; white-space: nowrap;"  # Add horizontal scrolling
+        #                         ),
+        #                 ui.output_plot("plot_roi"),
+        #                 # ui.output_plot("plot_roi_means"),
+        #                 ui.output_text("roi_to_globals_text"),
+        #                 ),
+        #             ),
 
 
-        ui.nav_panel("Draw Profiles",
+        # ui.nav_panel("Draw Profiles",
+        #              ui.page_sidebar(
+        #                 ui.sidebar(
+        #                     ui.input_select("masked_map_line", "Select mineral", choices=["All"]),
+        #                     ui.input_select("element_line", "Select element for drawing the line profile", choices=elements_all),                        
+        #                     ui.input_action_button("make_line_table", "Draw Line on Map"),                        
+        #                     ui.input_action_button("plot_line_map", "Show Map with Line Profiles"),                        
+        #                     ui.input_action_button("plot_profiles", "Show Profiles"),
+        #                     ui.input_action_button("lines_to_global", "Add Lines to Globals")
+        #                     ),
+        #                 ui.output_text("line_intro"),
+        #                 ui.div(
+        #                         ui.output_table("line_table"),
+        #                         style="overflow-x: auto; white-space: nowrap;"  # Add horizontal scrolling
+        #                         ),
+        #                 ui.output_plot("plot_lines"),
+        #                 ui.output_plot("plot_profs"),
+        #                 ui.output_text("lines_to_globals_text"),
+        #                 ),
+        #             ),
+
+        ui.nav_panel("Pb Isotopes",
                      ui.page_sidebar(
-                        ui.sidebar(
-                            ui.input_select("masked_map_line", "Select mineral", choices=["All"]),
-                            ui.input_select("element_line", "Select element for drawing the line profile", choices=elements_all),                        
-                            ui.input_action_button("make_line_table", "Draw Line on Map"),                        
-                            ui.input_action_button("plot_line_map", "Show Map with Line Profiles"),                        
-                            ui.input_action_button("plot_profiles", "Show Profiles"),
-                            ui.input_action_button("lines_to_global", "Add Lines to Globals")
+                         ui.sidebar(
+                             ui.input_numeric("thresh_206cps", "Threshold for 206Pb CPS", 10000),                                                                                    
+                             ui.input_checkbox("show_error_ellipse", "Show error ellipse of valid data?", value=True),
+                             ui.input_numeric("n_std_Pb", "Sigma multiplier for error ellipse", value=0.1),
+                             ui.input_checkbox("show_map_mean", "Show mean and standard error of valid data?", value=True),
+                             ui.input_checkbox("show_all_Pb", "Show all valid data points?", value=False),                             
+                             ui.input_checkbox("show_rois_Pb", "Show ROIs?", value = False)
+                             ),
+                        ui.row(
+                            ui.column(4, ui.input_checkbox("show_mnt", "Show SK75 Mantle?", value=True)),
+                            ui.column(4, ui.input_checkbox("show_ac", "Show SK75 Avg Crust?", value=True)),
+                            ui.column(4, ui.input_checkbox("show_uc", "Show SK75 Upper Crust?", value=True)),
                             ),
-                        ui.output_text("line_intro"),
-                        ui.div(
-                                ui.output_table("line_table"),
-                                style="overflow-x: auto; white-space: nowrap;"  # Add horizontal scrolling
+                        ui.row(
+                            ui.output_plot("Pb_Pb_plot")
+                            ),
+                        ui.row(
+                            ui.column(
+                                6,
+                                ui.input_numeric("Pb_age", "Age (Ma)", 1800, step=1),
+                                ui.input_numeric("mu", "mu (238U/204Pb) Default is 9.74", 9.74, step=0.01),
+                                ui.input_numeric("kappa", "kappa (232Th/238U) Default is 3.82", 3.82, step=0.01),
                                 ),
-                        ui.output_plot("plot_lines"),
-                        ui.output_plot("plot_profs"),
-                        ui.output_text("lines_to_globals_text"),
-                        ),
-                    ),
+                            ui.column(
+                                6,
+                                ui.input_checkbox("adjust_Pb_plot_lims", "Adjust plot limits?", value=False),
+                                ui.input_slider("Pb_plot_xlims", "Plot x limits", 0,2.5, value=[0.8, 1.2], step=0.01),
+                                ui.input_slider("Pb_plot_ylims", "Plot y limits", 0,4.5, value=[1.8, 3.2], step=0.01),
+                                ),
+                            ),                        
+                        )
+                     ),
 
-        ui.nav_panel("Graph",
-                     ui.page_fluid(
-                         ui.input_select("minerals_graph", "Select mineral(s) for plotting", choices=["All"], multiple=False),
-                         ui.input_checkbox("choose_elems_graph", "Choose elements for the graph?", value=False),
-                         ui.input_select("elems_graph", "If the above is ticked, select elements here", choices=elements_all, multiple=True),
-                         ui.input_numeric("min_conc", "Concentration Threshold (ppm)", 10),
-                         ui.input_numeric("corr_threshold", "Correlation Threshold", 0.5),
-                         ui.input_select("corr_type", "Correlation Type", choices=["Pearson", "Spearman"]),
-                         ui.input_action_button("make_graphs", "Make Graph"),
+        ui.nav_panel("Network Graph",
+                     ui.page_sidebar(
+                         ui.sidebar(
+                            ui.input_select("minerals_graph", "Select mineral(s) for plotting", choices=["All"], multiple=False),
+                            ui.input_checkbox("choose_elems_graph", "Choose elements for the graph?", value=False),
+                            ui.input_select("elems_graph", "If the above is ticked, select elements here", choices=elements_all, multiple=True),
+                            ui.input_numeric("min_conc", "Concentration Threshold (ppm)", 10),
+                            ui.input_numeric("corr_threshold", "Correlation Threshold", 0.5),
+                            ui.input_select("corr_type", "Correlation Type", choices=["Pearson", "Spearman"]),
+                            ui.input_action_button("make_graphs", "Make Graph"),
+                         ),
                          ui.output_plot("mats_graph_plot")
                         )
         ),
 
         ui.nav_panel("Correlation Matrix",
-                     ui.page_fluid(
-                         ui.input_select("minerals_corr_mat", "Select mineral(s) for plotting", choices=["All"], multiple=False),
-                         ui.input_select("corr_mat_els", "Select elements for correlation matrix", choices=elements_all, multiple=True),
-                         #  ui.input_numeric("min_conc_corr", "Concentration Threshold (ppm)", 10),
-                         #  ui.input_numeric("corr_threshold_matrix", "Correlation Threshold", 0.5),
-                         #  ui.input_numeric("corr_threshold_matrix2", "Correlation Threshold 2", 0.5),
-                         ui.input_checkbox("cor_log", "Log Scale?", value=False),
-                         ui.input_numeric("cor_linthresh", "Log scale linear threshold", 0.01),
-                         ui.input_select("corr_type_matrix", "Correlation Type", choices=["Pearson", "Spearman"]),
-                         ui.input_action_button("make_corr_matrix", "Make Correlation Matrix"),
+                     ui.page_sidebar(
+                            ui.sidebar(
+                            ui.input_select("minerals_corr_mat", "Select mineral(s) for plotting", choices=["All"], multiple=False),
+                            ui.input_select("corr_mat_els", "Select elements for correlation matrix", choices=elements_all, multiple=True),
+                            #  ui.input_numeric("min_conc_corr", "Concentration Threshold (ppm)", 10),
+                            #  ui.input_numeric("corr_threshold_matrix", "Correlation Threshold", 0.5),
+                            #  ui.input_numeric("corr_threshold_matrix2", "Correlation Threshold 2", 0.5),
+                            ui.input_checkbox("cor_log", "Log Scale?", value=False),
+                            ui.input_numeric("cor_linthresh", "Log scale linear threshold", 0.01),
+                            ui.input_select("corr_type_matrix", "Correlation Type", choices=["Pearson", "Spearman"]),
+                            ui.input_action_button("make_corr_matrix", "Make Correlation Matrix"),
+                            ),
                          ui.output_plot("plot_corr_matrix"),
                         )
                      ),
@@ -671,7 +823,7 @@ app_ui = ui.page_fluid(
                     ui.input_checkbox("use_log_pca", "Log scale for color map?", value=False),
                     ),
                 ui.output_plot("pca_plot"),
-                ui.output_text("pca_summary"),
+                # ui.output_text("pca_summary"),
                 )
             ),
     
@@ -712,7 +864,11 @@ def server(input: Inputs, output: Outputs, session: Session):
                 if file_name.endswith(".csv"):
                     mats[element_name] = np.loadtxt(file_path, delimiter=",")
                 elif file_name.endswith(".txt"):
-                    mats[element_name] = np.loadtxt(file_path) * 10000
+                    if element_name.endswith("_ppm"):
+                        mats[element_name] = np.loadtxt(file_path) * 10000
+                    else:
+                        mats[element_name] = np.loadtxt(file_path)
+                    # print(f"{element_name} shape = {np.shape(mats[element_name])}")
                 else:
                     print(f"Unsupported file format: {file_name}")
                     continue
@@ -720,6 +876,15 @@ def server(input: Inputs, output: Outputs, session: Session):
                 loaded_elements.append(element_name)
             except Exception as e:
                 print(f"Error loading file {file_name}: {e}")
+
+        shapes = [v.shape for v in mats.values() if isinstance(v, np.ndarray)]
+        if shapes:
+            min_rows = min(s[0] for s in shapes)
+            min_cols = min(s[1] for s in shapes)
+            # Clip all mats to the minimum shape
+            for k in mats:
+                if isinstance(mats[k], np.ndarray) and mats[k].shape[0] >= min_rows and mats[k].shape[1] >= min_cols:
+                    mats[k] = mats[k][:min_rows, :min_cols]
 
         global_mats = mats
         global_elements = loaded_elements
@@ -944,7 +1109,8 @@ def server(input: Inputs, output: Outputs, session: Session):
 
         loaded_elements = global_elements
 
-        df = pd.read_csv("{}/roi_data.txt".format(global_data_path), sep="\t")
+        # df = pd.read_csv("{}/roi_data.txt".format(global_data_path), sep="\t")
+        df = global_roi_data_df
         # df = pq.read_pandas("{}/roi_data.parquet".format(global_data_path)).to_pandas()
         roi_dict = {}
         roi_list = []
@@ -963,10 +1129,14 @@ def server(input: Inputs, output: Outputs, session: Session):
                         sanitized_string = '0'
                     else:
                         sanitized_string = str(value)
-                    array = np.array(ast.literal_eval(sanitized_string))
+                    try:
+                        array = np.array(ast.literal_eval(sanitized_string))
+                    except (ValueError, SyntaxError) as e:
+                        print(f"Error parsing string to array: ROI{i}. Element: {el}. Error: {e}")
+                        array = np.array([])  # Default to an empty array if parsing fails
                     region_data[el] = np.where(array == 0, np.nan, array)
-            roi_dict[f"ROI{i+1}"] = region_data
-            roi_list.append(f"ROI{i+1}")
+            roi_dict[f"ROI{i}"] = region_data
+            roi_list.append(f"ROI{i}")
         print(roi_list)
         # print(roi_dict["ROI12"])
 
@@ -1343,6 +1513,7 @@ def server(input: Inputs, output: Outputs, session: Session):
         if input.class_type() == "KMeans Classification":
             mats = global_mats
             loaded_elements = global_elements  # List to store successfully loaded elements
+            elements = input.kmeans_elems()
 
             # Filter the selected elements for KMeans clustering
             mats_ = {elem: mats[elem] for elem in input.kmeans_elems()}
@@ -1378,15 +1549,64 @@ def server(input: Inputs, output: Outputs, session: Session):
             loaded_elements.append("mineral_names")
             print(mineral_names)
 
-            # Dynamically create color mappings
-            colors_list = ["C0", "indianred", "goldenrod", "darkseagreen", "plum", "palegreen", "blue", "orange", "purple", "red", "green", "yellow", "pink"]
-            mineral_colors_mapped = {i: colors_list[i % len(colors_list)] for i in range(n_clusters)}
-            color_mapping = {mineral_categories[i]: mineral_colors_mapped[i] for i in range(n_clusters)}
+            stacked_mats = np.stack([mats[key] for key in elements], axis=0)       
+            mat_total = np.nansum(stacked_mats, axis=0)
+            mats["mat_total"] = mat_total
+            loaded_elements.append("mat_total")
+            mats_norm={}
+            for element in elements:
+                mats_norm[element] = (mats[element]/mat_total)*100
 
-            # Map mineral names to colors
-            mineral_colors = np.vectorize(color_mapping.get)(mineral_names)
+            silicates_df = get_std_mineral_df()
 
-            return mats, loaded_elements, np.unique(label_map), mineral_colors, color_mapping, mineral_colors_mapped
+            if silicates_df.empty:
+                colors_list = ["C0", "indianred", "goldenrod", "darkseagreen", "plum", "palegreen", "blue", "orange", "purple", "red", "green", "yellow", "pink"]
+                mineral_colors_mapped = {i: colors_list[i % len(colors_list)] for i in range(n_clusters)}
+                color_mapping = {mineral_categories[i]: mineral_colors_mapped[i] for i in range(n_clusters)}
+
+                # Map mineral names to colors
+                mineral_colors = np.vectorize(color_mapping.get)(mineral_names)
+
+                return mats, loaded_elements, np.unique(label_map), mineral_colors, color_mapping, mineral_colors_mapped
+        
+            
+            else:
+                rows, cols = mats["mineral_names"].shape
+                percent_match = np.full((rows, cols), np.nan)
+
+                for i in range(rows):
+                    for j in range(cols):
+                        mineral = mats["mineral_names"][i, j]
+                        # Get reference row for this mineral
+                        if silicates_df.empty:
+                            raise ValueError("You have not uploaded a mineral library")
+                        ref_row = silicates_df[silicates_df["mineral name"] == mineral]
+                        if ref_row.empty:
+                            continue  # No reference for this mineral
+                        # Get pixel composition for selected elements
+                        pixel_vals = np.array([mats[el][i, j] for el in elements])
+                        # Get reference composition for selected elements
+                        ref_vals = np.array([ref_row[el].values[0] for el in elements])
+                        # Normalize both to sum to 100 (avoid division by zero)
+                        if np.nansum(pixel_vals) == 0 or np.nansum(ref_vals) == 0:
+                            continue
+                        pixel_norm = (pixel_vals / np.nansum(pixel_vals)) * 100
+                        ref_norm = (ref_vals / np.nansum(ref_vals)) * 100
+                        # Calculate percent match
+                        diff = np.abs(pixel_norm - ref_norm)
+                        percent_match[i, j] = (1 - (np.nansum(diff) / 200)) * 100
+                
+                mats["max_percent_match"] = percent_match
+
+                # Dynamically create color mappings
+                colors_list = ["C0", "indianred", "goldenrod", "darkseagreen", "plum", "palegreen", "blue", "orange", "purple", "red", "green", "yellow", "pink"]
+                mineral_colors_mapped = {i: colors_list[i % len(colors_list)] for i in range(n_clusters)}
+                color_mapping = {mineral_categories[i]: mineral_colors_mapped[i] for i in range(n_clusters)}
+
+                # Map mineral names to colors
+                mineral_colors = np.vectorize(color_mapping.get)(mineral_names)
+
+                return mats, loaded_elements, np.unique(label_map), mineral_colors, color_mapping, mineral_colors_mapped
         
         elif input.class_type() == "Compositional Classification":
             mats = global_mats
@@ -1465,104 +1685,114 @@ def server(input: Inputs, output: Outputs, session: Session):
 
             silicates_df = get_std_mineral_df()
 
-            standard_values = {}
-            standard_elements = {}
-            mats_norm_mineral = {}
-            norm_diffs = {}
-            percent_match={}
-            for mineral in input.minerals_ID():
-                mats_norm_mineral[mineral] = {}
-                # mats_test_means[mineral] = {}
-                mineral_df = silicates_df.loc[silicates_df["mineral name"] == mineral]
-                # print(mineral_df)
-                mineral_df = mineral_df.reset_index(drop=True)
-                standard_values[mineral] = {}
-                standard_elements[mineral] = []
-                for elem in elements:
-                    if mineral_df[elem][0] == np.nan:
-                        print(f"{elem} not in {mineral}")
-                        continue
-                        # mats_test[mineral][elem] = np.full(mats[elem].shape, np.nan)
-                        # mats_test_means[mineral][elem] = np.nanmean(mats_test[mineral][elem])
-                    else:
-                        standard_values[mineral][elem] = mineral_df[elem][0]
-                        standard_elements[mineral].append(elem)
-                        mats_norm_mineral[mineral][elem] = mats_norm[elem]
-                stacked_standard_array = np.stack([pd.to_numeric(standard_values[mineral][key], errors='coerce') for key in standard_elements[mineral]], axis=0)
-                standard_values[mineral]["total"] = np.nansum(stacked_standard_array, axis=0)
-                norm_diffs[mineral] = {}
-                for e in standard_elements[mineral]:
-                    std_value_norm = (standard_values[mineral][e]/standard_values[mineral]["total"])*100
-                    norm_diffs[mineral][e] = np.abs(mats_norm_mineral[mineral][e] - std_value_norm)
-        
-                    # print(f"{e}:{std_value_norm}")
-                norm_diffs_stacked = np.stack([norm_diffs[mineral][el] for el in standard_elements[mineral]], axis=0)
-                norm_diffs_total = np.nansum(norm_diffs_stacked, axis=0)
-                percent_match[mineral] = (1-(norm_diffs_total/200))*100
-                
-                percent_match[mineral][percent_match[mineral] < min_thresh] = np.nan
-                percent_match[mineral][percent_match[mineral] > max_thresh] = np.nan
+            if silicates_df.empty:
+                raise ValueError("Please import a mineral library.")
+            else:
 
-            stacked_percent_matches = np.stack([percent_match[mineral] for mineral in input.minerals_ID()], axis=0)
-            max_percent_match = np.nanmax(stacked_percent_matches, axis=0)
-            mats["max_percent_match"] = max_percent_match
-            # Identify slices where all values are NaN
-            all_nan_mask = np.isnan(stacked_percent_matches).all(axis=0)
-
-            # Use nanargmax for slices with valid values
-            max_indices = np.full(stacked_percent_matches.shape[1:], -1, dtype=int)  # Default to -1 for all-NaN slices
-            valid_indices = ~all_nan_mask
-            max_indices[valid_indices] = np.nanargmax(stacked_percent_matches[:, valid_indices], axis=0)
-
-            # Handle all-NaN slices (optional: assign a specific value or leave as -1)
-            # For example, assign a specific index for "Unclassified":
-            unclassified_index = len(input.minerals_ID())  # Assuming this is the index for "Unclassified"
-            max_indices[all_nan_mask] = unclassified_index
-            mats["max_indices"] = max_indices
-            loaded_elements.append("max_indices")
-
+                standard_values = {}
+                standard_elements = {}
+                mats_norm_mineral = {}
+                norm_diffs = {}
+                percent_match={}
+                for mineral in input.minerals_ID():
+                    mats_norm_mineral[mineral] = {}
+                    # mats_test_means[mineral] = {}
+                    mineral_df = silicates_df.loc[silicates_df["mineral name"] == mineral]
+                    # print(mineral_df)
+                    mineral_df = mineral_df.reset_index(drop=True)
+                    standard_values[mineral] = {}
+                    standard_elements[mineral] = []
+                    for elem in elements:
+                        if mineral_df[elem][0] == np.nan:
+                            print(f"{elem} not in {mineral}")
+                            continue
+                            # mats_test[mineral][elem] = np.full(mats[elem].shape, np.nan)
+                            # mats_test_means[mineral][elem] = np.nanmean(mats_test[mineral][elem])
+                        else:
+                            standard_values[mineral][elem] = mineral_df[elem][0]
+                            standard_elements[mineral].append(elem)
+                            mats_norm_mineral[mineral][elem] = mats_norm[elem]
+                    stacked_standard_array = np.stack([pd.to_numeric(standard_values[mineral][key], errors='coerce') for key in standard_elements[mineral]], axis=0)
+                    standard_values[mineral]["total"] = np.nansum(stacked_standard_array, axis=0)
+                    norm_diffs[mineral] = {}
+                    for e in standard_elements[mineral]:
+                        std_value_norm = (standard_values[mineral][e]/standard_values[mineral]["total"])*100
+                        norm_diffs[mineral][e] = np.abs(mats_norm_mineral[mineral][e] - std_value_norm)
             
-            mineral_list = list(input.minerals_ID()) + ["Unclassified"]
-            mineral_categories = {mineral: i for i, mineral in enumerate(mineral_list)}
-            # mineral_categories["Unclassified"] = len(input.minerals_ID())
-            # mineral_list = list(input.minerals_ID()) + ["Unclassified"]
-            # mineral_names = np.vectorize(mineral_categories.get)(mats["max_indices"])
-            mineral_names = np.vectorize(lambda idx: mineral_list[idx])(max_indices) # Used to be called max_keys
-            mats["mineral_names"] = mineral_names
-            loaded_elements.append("mineral_names")
-            numeric_max_key = np.vectorize(mineral_categories.get)(mineral_names)
-            mats["numeric_max_key"] = numeric_max_key
-            loaded_elements.append("numeric_max_key")
-            # print(mineral_names)
+                        # print(f"{e}:{std_value_norm}")
+                    norm_diffs_stacked = np.stack([norm_diffs[mineral][el] for el in standard_elements[mineral]], axis=0)
+                    norm_diffs_total = np.nansum(norm_diffs_stacked, axis=0)
+                    percent_match[mineral] = (1-(norm_diffs_total/200))*100
+                    
+                    percent_match[mineral][percent_match[mineral] < min_thresh] = np.nan
+                    percent_match[mineral][percent_match[mineral] > max_thresh] = np.nan
 
-            unique_num_keys = np.unique(numeric_max_key)
-            # unique_min_cats = {mineral_list[key]: i for i,key in enumerate(unique_num_keys)}
-            # print(unique_min_cats)
-            # unique_min_list = list(unique_min_cats.keys())
-            colors_list = ["C0", "indianred", "darkseagreen", "goldenrod", "plum", "palegreen", "blue", "orange", "purple", "red", "green", "yellow", "pink"]
-            mineral_colors_mapped = {num_key: colors_list[i % len(colors_list)] for i, num_key in enumerate(unique_num_keys)}
-            # mineral_colors_mapped = {i: colors_list[i] for i in range(len(mineral_list))}
-            color_mapping = {mineral_list[num_key]: mineral_colors_mapped[num_key] for num_key in unique_num_keys}
-            print(mineral_colors_mapped)
-            print(color_mapping)
-            # cmap = colors.ListedColormap([mineral_colors_mapped[key] for key in sorted(mineral_colors_mapped.keys()) if key in mineral_colors_mapped.keys()])
+                stacked_percent_matches = np.stack([percent_match[mineral] for mineral in input.minerals_ID()], axis=0)
+                max_percent_match = np.nanmax(stacked_percent_matches, axis=0)
+                mats["max_percent_match"] = max_percent_match
+                # Identify slices where all values are NaN
+                all_nan_mask = np.isnan(stacked_percent_matches).all(axis=0)
 
-            # colors_list = ["C0", "indianred", "darkseagreen", "goldenrod", "plum", "palegreen", "blue", "orange", "purple", "red", "green", "yellow", "pink"]
-            # mineral_colors_mapped = {i: colors_list[i % len(colors_list)] for i in range(len(mineral_names))}
+                # Use nanargmax for slices with valid values
+                max_indices = np.full(stacked_percent_matches.shape[1:], -1, dtype=int)  # Default to -1 for all-NaN slices
+                valid_indices = ~all_nan_mask
+                max_indices[valid_indices] = np.nanargmax(stacked_percent_matches[:, valid_indices], axis=0)
 
-            # if mineral_names.ndim > 1:
-            #     mineral_names = mineral_names.flatten()
-            # while len(mineral_colors_mapped) < len(mineral_names):
-                
-            # mineral_colors_mapped[len(mineral_colors_mapped)] = colors_list[len(mineral_colors_mapped) % len(colors_list)]
+                # Handle all-NaN slices (optional: assign a specific value or leave as -1)
+                # For example, assign a specific index for "Unclassified":
+                unclassified_index = len(input.minerals_ID())  # Assuming this is the index for "Unclassified"
+                max_indices[all_nan_mask] = unclassified_index
+                mats["max_indices"] = max_indices
+                loaded_elements.append("max_indices")
+                # print(max_indices)
 
-            # # Create the color_mapping dictionary
-            # color_mapping = {str(mineral_names[i]): mineral_colors_mapped[i] for i in range(len(mineral_names))}
-            # # color_mapping = {str(mineral_names[i]): mineral_colors_mapped[i] for i in range(len(mineral_names))}
+                unique_mins = np.unique(max_indices)
+                minerals_selected = list(input.minerals_ID()) + ["Unclassified"]
+                mineral_list = [minerals_selected[i] for i in unique_mins]
+                mineral_categories = {mineral: i for i, mineral in zip(unique_mins, mineral_list)}
+                # print(mineral_categories)
+                # mineral_categories["Unclassified"] = len(input.minerals_ID())
+                # mineral_list = list(input.minerals_ID()) + ["Unclassified"]
+                # mineral_names = np.vectorize(mineral_categories.get)(mats["max_indices"])
+                mineral_names = np.vectorize(lambda idx: minerals_selected[idx])(max_indices) # Used to be called max_keys
+                mats["mineral_names"] = mineral_names
+                loaded_elements.append("mineral_names")
+                numeric_max_key = np.vectorize(mineral_categories.get)(mineral_names)
+                mats["numeric_max_key"] = numeric_max_key
+                loaded_elements.append("numeric_max_key")
+                # print(mineral_names)
 
-            mineral_colors = np.vectorize(color_mapping.get)(mineral_names)
+                # unique_num_keys = np.unique(numeric_max_key)
+                unique_num_keys = unique_mins
+                # unique_min_cats = {mineral_list[key]: i for i,key in enumerate(unique_num_keys)}
+                # print(unique_min_cats)
+                # unique_min_list = list(unique_min_cats.keys())
+                colors_list = ["C0", "indianred", "darkseagreen", "goldenrod", "plum", "palegreen", "blue", "orange", "purple", "red", "green", "yellow", "pink"]
+                mineral_colors_mapped = {num_key: colors_list[num_key % len(colors_list)] for num_key in unique_num_keys}
+                color_mapping = {minerals_selected[num_key]: colors_list[num_key % len(colors_list)] for num_key in unique_num_keys}
 
-            return mats, loaded_elements, np.unique(max_indices), mineral_colors, color_mapping, mineral_colors_mapped
+                # mineral_colors_mapped = {i: colors_list[i] for i in range(len(mineral_list))}
+                # color_mapping = {mineral_list[num_key]: mineral_colors_mapped[num_key] for num_key in unique_num_keys}
+                # print(mineral_colors_mapped)
+                # print(color_mapping)
+                # cmap = colors.ListedColormap([mineral_colors_mapped[key] for key in sorted(mineral_colors_mapped.keys()) if key in mineral_colors_mapped.keys()])
+
+                # colors_list = ["C0", "indianred", "darkseagreen", "goldenrod", "plum", "palegreen", "blue", "orange", "purple", "red", "green", "yellow", "pink"]
+                # mineral_colors_mapped = {i: colors_list[i % len(colors_list)] for i in range(len(mineral_names))}
+
+                # if mineral_names.ndim > 1:
+                #     mineral_names = mineral_names.flatten()
+                # while len(mineral_colors_mapped) < len(mineral_names):
+                    
+                # mineral_colors_mapped[len(mineral_colors_mapped)] = colors_list[len(mineral_colors_mapped) % len(colors_list)]
+
+                # # Create the color_mapping dictionary
+                # color_mapping = {str(mineral_names[i]): mineral_colors_mapped[i] for i in range(len(mineral_names))}
+                # # color_mapping = {str(mineral_names[i]): mineral_colors_mapped[i] for i in range(len(mineral_names))}
+
+                mineral_colors = np.vectorize(color_mapping.get)(mineral_names)
+
+                return mats, loaded_elements, np.unique(max_indices), mineral_colors, color_mapping, mineral_colors_mapped
 
 
 
@@ -1709,6 +1939,7 @@ def server(input: Inputs, output: Outputs, session: Session):
         _, loaded_elements = data_loader()  # Get the loaded elements
         ui.update_select("elem_4_entropy", choices=loaded_elements)
         ui.update_select("element", choices=loaded_elements)
+        ui.update_select("element_plotly", choices=loaded_elements)
         ui.update_select("element_red", choices=loaded_elements)
         ui.update_select("element_green", choices=loaded_elements)
         ui.update_select("element_blue", choices=loaded_elements)
@@ -1744,6 +1975,7 @@ def server(input: Inputs, output: Outputs, session: Session):
         _, loaded_elements2 = calc_entropy()  # Get the loaded elements
         # ui.update_select("elem_4_entropy", choices=loaded_elements2)
         ui.update_select("element", choices=loaded_elements2)
+        ui.update_select("element_plotly", choices=loaded_elements2)
         ui.update_select("element_red", choices=loaded_elements2)
         ui.update_select("element_green", choices=loaded_elements2)
         ui.update_select("element_blue", choices=loaded_elements2)
@@ -1795,6 +2027,7 @@ def server(input: Inputs, output: Outputs, session: Session):
     def update_elem_choices_calc():
         _, loaded_elements3, _, _ = matrix_calc_add()
         ui.update_select("element", choices=loaded_elements3)
+        ui.update_select("element_plotly", choices=loaded_elements3)
         ui.update_select("elem_4_entropy", choices=loaded_elements3)
         ui.update_select("element_red", choices=loaded_elements3)
         ui.update_select("element_green", choices=loaded_elements3)
@@ -1993,6 +2226,7 @@ def server(input: Inputs, output: Outputs, session: Session):
                 Patch(facecolor=color, edgecolor='none', label=label)
                 for label, color in color_mapping.items()
             ]
+
             ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.05, 1), fontsize=8, frameon=True)
 
             mineral_masked_mats = create_mineral_masked_mats()
@@ -2005,21 +2239,30 @@ def server(input: Inputs, output: Outputs, session: Session):
                 mats = ycf_cor_mats
             else:
                 mats = mats_
-            
+
+            unique_vals, inverse = np.unique(mats["max_indices"], return_inverse=True)
+            plot_mat = inverse.reshape(mats["max_indices"].shape) + 1
+
+            # print("Unique max indices: ", np.unique(plot_mat))
             # cmap = colors.ListedColormap([mineral_colors_mapped[key] for key in sorted(mineral_colors_mapped.keys()) if key in mineral_colors_mapped.keys()])
+            # colors_list = ["C0", "indianred", "darkseagreen", "goldenrod", "plum", "palegreen", "blue", "orange", "purple", "red", "green", "yellow", "pink"]
             cmap = colors.ListedColormap([mineral_colors_mapped[key] for key in sorted(mineral_colors_mapped.keys()) if key in mineral_colors_mapped.keys()])
-            print("mineral_colors_mapped:", mineral_colors_mapped)
-            print("numeric_max_key unique values:", np.unique(mats["numeric_max_key"]))
+            # print("mineral_colors_mapped:", mineral_colors_mapped)
+            # print("numeric_max_key unique values:", np.unique(mats["numeric_max_key"]))
             fig, ax = plt.subplots()
-            ax.imshow(mats["numeric_max_key"], cmap=cmap)
+            ax.imshow(plot_mat, cmap=cmap,
+                      extent=[0, np.shape(plot_mat)[1]*input.pixel_size()*asp_ratio, 0, np.shape(plot_mat)[0]*input.pixel_size()], 
+                      interpolation='none', alpha=1.0)
             plt.xticks([])
             plt.yticks([])
             plt.title("Mineral Library Matching")
             plt.grid(False)
             plt.tight_layout()
+            # print("name_max_key unique values:", np.unique(mats["mineral_names"]))
+            # print("color mapping:", color_mapping)
             legend_elements = [
                     Patch(facecolor=color, edgecolor='none', label=label)
-                    for label, color in color_mapping.items()
+                    for label, color in color_mapping.items() if label in color_mapping.keys()
                 ]
             ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.01, 1), fontsize=8, frameon=True)
 
@@ -2085,38 +2328,68 @@ def server(input: Inputs, output: Outputs, session: Session):
             cluster_averages["Mineral Name"][-1] = "Unclassified"
         # Convert to a pandas DataFrame
         df = pd.DataFrame(cluster_averages)
+        global global_cluster_means_df
+        global_cluster_means_df = df
 
         # Save the table to an Excel file (optional)
         # df.to_excel(f"{global_data_path}/cluster_averages.xlsx", index=False)
 
         return df
     
+    @render.download(filename = "cluster_means.xlsx")
+    def download_min_means():
+        output = io.BytesIO()
+        global_cluster_means_df.to_excel(output, index=False)
+        output.seek(0)
+        return output
+        
+
+    
     @render.plot
     # @reactive.event(input.ID_mins)
     def yield_cor_plot():
+        asp_ratio = calc_asp_ratio()
+        # if input.class_type() == "Library Matching":
+        mats, loaded_elements, color_nums, mineral_colors, color_mapping, mineral_colors_mapped = data_loader_3()
+        # if input.use_cor_mats() == True:
+        #     mats = ycf_cor_mats
+        # else:
+        #     mats = mats_
+        # cmap = colors.ListedColormap([mineral_colors_mapped[key] for key in sorted(mineral_colors_mapped.keys()) if key in mineral_colors_mapped.keys()])
+        cmap = colors.ListedColormap([mineral_colors_mapped[key] for key in sorted(mineral_colors_mapped.keys()) if key in mineral_colors_mapped.keys()])
+        fig, ax = plt.subplots()
         if input.class_type() == "Library Matching":
-            mats, loaded_elements, color_nums, mineral_colors, color_mapping, mineral_colors_mapped = data_loader_3()
-            # if input.use_cor_mats() == True:
-            #     mats = ycf_cor_mats
-            # else:
-            #     mats = mats_
-            # cmap = colors.ListedColormap([mineral_colors_mapped[key] for key in sorted(mineral_colors_mapped.keys()) if key in mineral_colors_mapped.keys()])
-            cmap = colors.ListedColormap([mineral_colors_mapped[key] for key in sorted(mineral_colors_mapped.keys()) if key in mineral_colors_mapped.keys()])
-            fig, ax = plt.subplots()
-            ax.imshow(mats["numeric_max_key"], cmap=cmap)
-            # plt.xticks([])
-            # plt.yticks([])
-            plt.title("Mineral Library Matching")
-            plt.grid(False)
-            plt.tight_layout()
-            legend_elements = [
-                    Patch(facecolor=color, edgecolor='none', label=label)
-                    for label, color in color_mapping.items()
-                ]
-            ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.01, 1), fontsize=8, frameon=True)
-            ax.axhline(input.row_number(), c="r", alpha=0.7)
-        else:
-            raise ValueError("Classification must be done by Mineral Library Matching")
+            ax.imshow(mats["numeric_max_key"], cmap=cmap,
+                      extent=[0, np.shape(mats["numeric_max_key"])[1]*asp_ratio, 0, np.shape(mats["numeric_max_key"])[0]],
+                      interpolation='none', alpha=1.0)
+            if input.row_number() <= np.shape(mats["numeric_max_key"])[0]:
+                hline_pos = input.row_number()
+            else:
+                hline_pos = input.row_number() - np.shape(mats["numeric_max_key"])[0]
+            # ax.set_xticks(np.arange(0, np.shape(mats["numeric_max_key"])[1], 1))
+        if input.class_type() == "KMeans Classification":
+            ax.imshow(mats["kmeans"], cmap=cmap,
+                      extent=[0, np.shape(mats["kmeans"])[1]*asp_ratio, 0, np.shape(mats["kmeans"])[0]],
+                      interpolation='none', alpha=1.0)
+            if input.row_number() <= np.shape(mats["kmeans"])[0]:
+                hline_pos = input.row_number()
+            else:
+                hline_pos = input.row_number() - np.shape(mats["kmeans"])[0]
+            # ax.set_xticks(np.arange(0, np.shape(mats["kemans"])[1], 1))
+        # plt.xticks([])
+        # plt.yticks([])
+        plt.title("Mineral Library Matching")
+        plt.grid(False)
+        plt.tight_layout()
+        legend_elements = [
+                Patch(facecolor=color, edgecolor='none', label=label)
+                for label, color in color_mapping.items()
+            ]
+        ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.01, 1), fontsize=8, frameon=True)        
+        ax.axhline(hline_pos, c="r", alpha=0.7)
+        
+        # else:
+        #     raise ValueError("Classification must be done by Mineral Library Matching")
 
             
 
@@ -2124,15 +2397,25 @@ def server(input: Inputs, output: Outputs, session: Session):
     @render.plot
     # @reactive.event(input.perf_yield_cor)
     def plot_max_percent():
+        asp_ratio = calc_asp_ratio()
         global global_masked_mats
         global global_mats
-        if input.class_type() == "Library Matching":
-            global ycf_global
+        global ycf_global
 
-            mats, loaded_elements, color_nums, mineral_colors, color_mapping, mineral_colors_mapped = data_loader_3()
+        mats, loaded_elements, color_nums, mineral_colors, color_mapping, mineral_colors_mapped = data_loader_3()
+
+        if input.class_type() == "Library Matching":
+            elements = input.elements_ID()
+        if input.class_type() == "KMeans Classification":
+            elements = input.kmeans_elems()
             
-            mineral_list = np.unique(mats["mineral_names"])
-            silicates_df = get_std_mineral_df()
+        mineral_list = np.unique(mats["mineral_names"])
+        silicates_df = get_std_mineral_df()
+
+        if silicates_df.empty:
+            raise ValueError("Please import a mineral library.")
+        
+        else:
             standard_values = {}
             standard_elements = {}
             for mineral in mineral_list:
@@ -2141,7 +2424,7 @@ def server(input: Inputs, output: Outputs, session: Session):
                     standard_elements[mineral] = []
                     mineral_df = silicates_df.loc[silicates_df["mineral name"] == mineral]
                     mineral_df = mineral_df.reset_index(drop=True)
-                    for elem in input.elements_ID():
+                    for elem in elements:
                         if elem not in ["kmeans", "comp_cats", "mineral", "mineral_names", "numeric_max_key", "mat_total", "max_indices", "max_percent_match"]:
                             if mineral_df[elem][0] == np.nan:
                                 print(f"{elem} not in {mineral}")
@@ -2163,10 +2446,15 @@ def server(input: Inputs, output: Outputs, session: Session):
                     mineral_total = standard_values[mineral]["total"]
                     mineral_total_mat = np.full_like(max_keys, mineral_total, dtype=float)  # Broadcast scalar to array                   
                     std_totals_max[max_keys == mineral] = mineral_total_mat[max_keys == mineral]
-            unclassified_mask = (max_keys == "Unclassified")
-            std_totals_max[unclassified_mask] = mat_total[unclassified_mask]/10000
+            if "Unclassified" in max_keys:
+                unclassified_mask = (max_keys == "Unclassified")
+                std_totals_max[unclassified_mask] = mat_total[unclassified_mask]/10000
 
             yield_cor_fact = (mat_total/10000)/std_totals_max
+            if "Unclassified" in max_keys:
+                yield_cor_fact[max_keys == "Unclassified"] = 1
+
+            # yield_cor_fact = np.where(yield_cor_fact == 0, np.nan, yield_cor_fact)
             
             ycf_global = yield_cor_fact
 
@@ -2186,22 +2474,42 @@ def server(input: Inputs, output: Outputs, session: Session):
             # for mineral in mineral_list:
             #     ycf_cor_masked_mats[mineral] = {elem: masked_mats[mineral][elem]/yield_cor_fact for elem in loaded_elements if elem not in non_elemental_elements}
 
-
-            row_no = input.row_number()
-            col_min = input.col_min()
-            col_max = input.col_max()
+            
+            # print(f"Row No.: {row_no/input.pixel_size()}")
+            # col_min = int(input.col_min()/asp_ratio)
+            # col_max = int(input.col_max()/asp_ratio)
             fig, axs = plt.subplots(3,1, sharex=True)
-            unique_min_no = np.unique(mats["numeric_max_key"])
+            if input.class_type() == "Library Matching":
+                unique_min_no = np.unique(mats["numeric_max_key"])
+            if input.class_type() == "KMeans Classification":
+                unique_min_no = np.unique(mats["kmeans"])
             min_no_mapping = {num_key: i for i, num_key in enumerate(unique_min_no)}
-            min_no_mat = np.vectorize(min_no_mapping.get)(mats["numeric_max_key"])
-            axs[0].plot(min_no_mat[row_no, col_min:col_max], c="r")
+            if input.class_type() == "Library Matching":
+                min_no_mat = np.vectorize(min_no_mapping.get)(mats["numeric_max_key"])
+            if input.class_type() == "KMeans Classification":
+                min_no_mat = np.vectorize(min_no_mapping.get)(mats["kmeans"])
+            row_no = (np.shape(min_no_mat)[0]-1) - input.row_number()
+            print(row_no)
+            x_var = np.linspace(0, np.shape(mats["numeric_max_key"])[1]*asp_ratio, np.shape(mats["numeric_max_key"])[1])
+            axs[0].plot(x_var, min_no_mat[row_no], c="r")
             axs[0].set_ylabel("Mineral No.")
-            axs[1].plot(mats["max_percent_match"][row_no, col_min:col_max], c="r")
+            axs[0].invert_yaxis()
+            axs[1].plot(x_var, mats["max_percent_match"][row_no], c="r")
             axs[1].set_ylabel("Match %")
-            axs[2].plot(yield_cor_fact[row_no, col_min:col_max], c="r")
+            axs[2].plot(x_var, yield_cor_fact[row_no], c="r")
             axs[2].set_ylabel("Yield CF")
-        else:
-            raise ValueError("Classification must be done by Mineral Library Matching")
+
+    @render.plot
+    def ycf_plot():
+        asp_ratio = calc_asp_ratio()
+        plt.imshow(ycf_global,
+                   extent=[0, np.shape(ycf_global)[1]*asp_ratio, 0, np.shape(ycf_global)[0]],
+                      interpolation='none')
+        plt.title("Yield CF")
+        plt.colorbar()
+        plt.grid(False)
+        plt.tight_layout()
+        
         
     
     @render.table
@@ -2209,47 +2517,353 @@ def server(input: Inputs, output: Outputs, session: Session):
     def apply_yield_cor():
         global ycf_cor_mats
         global ycf_cor_masked_mats
-        if input.class_type() == "Library Matching":
+        # if input.class_type() == "Library Matching":
 
-            mats, loaded_elements, color_nums, mineral_colors, color_mapping, mineral_colors_mapped = data_loader_3()
-            mineral_list = np.unique(mats["mineral_names"])
+        mats, loaded_elements, color_nums, mineral_colors, color_mapping, mineral_colors_mapped = data_loader_3()
+        mineral_list = np.unique(mats["mineral_names"])
 
-            yield_cor_fact = ycf_global
+        yield_cor_fact = ycf_global
 
-            non_elemental_elements = ["kmeans", "comp_cats", "mineral", "mineral_names", "numeric_max_key", "mat_total", "max_indices", "max_percent_match"]
-                
-            ycf_cor_mats = {}
+        non_elemental_elements = ["kmeans", "comp_cats", "mineral", "mineral_names", "numeric_max_key", "mat_total", "max_indices", "max_percent_match"]
+        non_elemental_elements += [
+            k for k in mats.keys()
+            if "CPS" in k or any(op in k for op in ["/", "+", "-", "*"])]
+
+            
+        ycf_cor_mats = {}
+        for elem in loaded_elements:
+            if elem not in non_elemental_elements:
+                ycf_cor_mats[elem] = mats[elem]/yield_cor_fact
+        for elem in non_elemental_elements:
+                if elem in mats.keys():
+                    ycf_cor_mats[elem] = mats[elem]
+
+        masked_mats = global_masked_mats
+
+        ycf_cor_masked_mats = {}
+        for mineral in mineral_list:
+            ycf_cor_masked_mats[mineral] = {elem: masked_mats[mineral][elem]/yield_cor_fact for elem in loaded_elements if elem not in non_elemental_elements}
+
+        cor_data_means_dict = {}
+        for mineral in mineral_list:
+            cor_data_means_dict[mineral] = {}
+            cor_data_means_dict[mineral]["mineral"] = mineral
             for elem in loaded_elements:
                 if elem not in non_elemental_elements:
-                    ycf_cor_mats[elem] = mats[elem]/yield_cor_fact
-            for elem in non_elemental_elements:
-                    if elem in mats.keys():
-                        ycf_cor_mats[elem] = mats[elem]
-
-            masked_mats = global_masked_mats
-
-            ycf_cor_masked_mats = {}
-            for mineral in mineral_list:
-                ycf_cor_masked_mats[mineral] = {elem: masked_mats[mineral][elem]/yield_cor_fact for elem in loaded_elements if elem not in non_elemental_elements}
-
-            cor_data_means_dict = {}
-            for mineral in mineral_list:
-                cor_data_means_dict[mineral] = {}
-                cor_data_means_dict[mineral]["mineral"] = mineral
-                for elem in loaded_elements:
-                    if elem not in non_elemental_elements:
+                    ycf_cor_masked_mats[mineral][elem][np.isinf(ycf_cor_masked_mats[mineral][elem])] = np.nan
+                    if np.isnan(ycf_cor_masked_mats[mineral][elem]).all():
+                        cor_data_means_dict[mineral][elem] = np.nan
+                        print(f"{mineral}/{elem} contained all nans")
+                    else:                        
                         cor_data_means_dict[mineral][elem] = np.nanmean(ycf_cor_masked_mats[mineral][elem])
-                        cor_data_means_dict[mineral][f"{elem} 1sd"] = np.nanstd(ycf_cor_masked_mats[mineral][elem])
-            
-            cor_data_means_df = pd.DataFrame.from_dict(cor_data_means_dict, orient="index")
-            return cor_data_means_df
-
-        else:
-            raise ValueError("Classification must be done by Mineral Library Matching")
+                    cor_data_means_dict[mineral][f"{elem} 1sd"] = np.nanstd(ycf_cor_masked_mats[mineral][elem])
         
+        cor_data_means_df = pd.DataFrame.from_dict(cor_data_means_dict, orient="index")
+        legend_order = list(color_mapping.keys())
+        cor_data_means_df = cor_data_means_df.reindex(legend_order)
+        global global_cor_data_means_df
+        global_cor_data_means_df = cor_data_means_df
+        return cor_data_means_df
+
+        # else:
+        #     raise ValueError("Classification must be done by Mineral Library Matching")
+        
+    @render.download(filename = "ycf_means.xlsx")
+    def download_yc_means():
+        output = io.BytesIO()
+        global_cor_data_means_df.to_excel(output, index=False)
+        output.seek(0)
+        return output
+    
+    
+ 
+    # @render_widget
+    # def image_plot():
+    #     mats = global_mats
+    #     mat = mats[input.element_plotly()]
+    #     x_coords = []
+    #     y_coords =[]        
+    #     for row in range((np.shape(mat)[0])):
+    #         for col in range((np.shape(mat)[1])):
+    #             x_coords.append(col)
+    #             y_coords.append(row)
+    #     # data_x = np.array([1,2,3,4])
+    #     # data_y = np.array([5,6,7,8])
+    #     # fig = px.imshow(mat)
+    #     fig = px.scatter(x=x_coords, y=y_coords,
+    #         color=np.log10(mat.flatten()), # Apply log10 to the color values
+    #         # color_continuous_scale = parula,
+    #         color_continuous_scale=input.plotly_colorscale(),  # Choose a colorscale (e.g., "Viridis", "Inferno", etc.)
+    #         labels={"color": input.element_plotly()})
+    #     # fig = go.Figure(data=go.Heatmap(x=x_coords, y=y_coords, z=mat.flatten()))
+    #     # fig = px.imshow(mat)
+    #     fig.update_traces(marker=dict(size=5, symbol="square"))
+    #     fig.update_layout(dragmode="select", autosize=False)  # Enables box select
+    #     # fig.update_xaxes(title="X Pixel")
+    #     # fig.update_yaxes(title="Y Pixel")
+    #     fig.update_yaxes(autorange='reversed')
+    #     fig.update_layout(xaxis=dict(visible=False), yaxis=dict(visible=False), plot_bgcolor="white")
+    #     # fig.add_trace(go.Heatmap(data=mat))
+    #     w = go.FigureWidget(fig.data, fig.layout)
+    #     w.data[0].on_selection(on_point_selection)
+    #     w.update_layout(newselection=dict(line=dict(color="red", width=2)))
+    #     return w
+    selection_reactive = reactive.value(None)
+
+    @render_widget
+    def image_plot():
+        asp_ratio = calc_asp_ratio()
+        if input.use_cor_mats() == True:
+            mats = ycf_cor_mats
+        else:
+            mats = global_mats 
+        mat = mats[input.element_plotly()]
+        mat[np.isinf(mat)] = 0
+        mat[np.isnan(mat)] = 0
+        color_scale = batlow_plotly if input.plotly_colorscale() == "batlow" else input.plotly_colorscale()
+        x_extent = np.linspace(0, mat.shape[1]*asp_ratio, mat.shape[1])
+        y_extent = np.linspace(0, mat.shape[0], mat.shape[0])
+        vmin_ = np.nanpercentile(mat, input.min_max_vals_roi()[0])
+        vmax_ = np.nanpercentile(mat, input.min_max_vals_roi()[1])
+        fig = px.imshow(mat, x=x_extent, y=y_extent,
+                        range_color=[vmin_, vmax_], 
+                        color_continuous_scale=color_scale,
+                        labels={"x": "pixel no.", "y": "pixel no."})
+
+        # Set drag mode based on the selection tool
+        dragmode = "select" if input.plotly_tool() == "rectangle" else "lasso"
+        fig.update_layout(dragmode=dragmode, autosize=False)
+        fig.update_layout(plot_bgcolor="white")
+        fig.update_layout(modebar_remove=["zoom", "pan"])
+        fig.update_layout(newselection=dict(line=dict(color="red", width=2)))
+
+        # Create a FigureWidget
+        w = go.FigureWidget(fig)
+
+        w.data[0].on_selection(on_point_selection)
+
+        return w
+    
+    def on_point_selection(trace, points, state):
+        selection_reactive.set(state)
 
 
-    @render.plot
+
+    # @render_widget
+    # def image_plot():
+    #     mats = global_mats
+    #     mat = mats[input.element_plotly()]
+    #     color_scale = batlow_plotly if input.plotly_colorscale() == "batlow" else input.plotly_colorscale()
+    #     fig = px.imshow(mat, color_continuous_scale=color_scale)
+
+    #     # Enable drawing rectangles
+    #     fig.update_layout(
+    #         dragmode='drawrect',
+    #         newshape=dict(line_color="cyan"),
+    #         modebar_add=["drawrect", "eraseshape"]
+    #     )
+
+    #     # Convert the figure to a FigureWidget
+    #     fig_widget = go.FigureWidget(fig)
+
+    #     # Callback to capture shapes
+    #     def on_shape_change(layout, new_shapes):
+    #         if "shapes" in layout:
+    #             shapes_reactive.set(layout["shapes"])  # Store the shapes in the reactive value
+    #             print(f"Shapes updated: {layout['shapes']}")  # Debugging output
+
+    #     # Attach the callback to the layout's `shapes` property
+    #     fig_widget.layout.on_change(on_shape_change, "shapes")
+
+    #     return fig_widget
+    
+    # @reactive.Effect
+    # @reactive.event(input.btn)
+    # def show_shape_info():
+    #     shapes = shapes_reactive.get()
+    #     if shapes:
+    #         shapes_json = json.dumps(shapes, indent=2)
+    #         @output
+    #         @render.text
+    #         def dump():
+    #             return shapes_json
+    #     else:
+    #         @output
+    #         @render.text
+    #         def dump():
+    #             return "No shapes drawn yet."
+            
+        # # Create a FigureWidget
+        # w = go.FigureWidget(fig)
+
+        # # Callback to handle shape changes
+
+        
+        #     # print("NEW SHAPE ADDED")
+        #     # print("DEBUG: Callback triggered")
+        #     # print("DEBUG: Layout changed:", layout)
+        #     # print("DEBUG: New shapes:", new_shapes)
+        #     # if new_shapes:
+        #     #     # Process the last shape added
+        #     #     new_shape = new_shapes[-1]
+        #     #     if new_shape['type'] == 'rect':
+        #     #         x0, x1 = new_shape['x0'], new_shape['x1']
+        #     #         y0, y1 = new_shape['y0'], new_shape['y1']
+        #     #         print(f"Rectangle coordinates: x0={x0}, x1={x1}, y0={y0}, y1={y1}")
+
+        # w.layout.on_relayout(on_shape_change)
+
+        # return w
+    
+    # def on_shape_change(relayout_data):
+    #     shape_reactive.set(relayout_data)
+
+    
+    # def on_shape_change(layout):
+    #     # print(f"Layout from function: {layout}")
+    #     print(f"from function: {layout.shapes}")
+
+
+        # fig_widget = go.FigureWidget(fig)
+
+
+        # # Define the callback for layout changes
+        # def on_shape_change(layout, new_shapes):
+        #     print(f"Layout from function: {layout}")
+        #     if new_shapes:
+        #         # Get the last shape added
+        #         new_shape = new_shapes[-1]
+        #         if new_shape['type'] == 'rect':
+        #             x0, x1 = new_shape['x0'], new_shape['x1']
+        #             y0, y1 = new_shape['y0'], new_shape['y1']
+        #             print(f"Rectangle coordinates: x0={x0}, x1={x1}, y0={y0}, y1={y1}")
+
+        # # Attach the callback to listen for changes in shapes
+        # print(fig_widget.layout)
+        # print(fig_widget.data)
+        # fig_widget.layout.on_change(on_shape_change, 'shapes')
+
+        # # fig_widget._config = fig_widget._config | {'modeButtonsToAdd': ['drawline', 'drawopenpath', 'drawclosedpath', 'drawcircle', 'drawrect', 'eraseshape']}
+        # return fig_widget
+    
+    # def on_point_selection(trace, points, state):
+    #     selection_reactive.set(state)
+
+    @render.text
+    def print_coords():
+        # return "Ignore: this is a placeholder for debugging"
+        if selection_reactive.get() is None:
+            return "No points selected."
+        else:
+            x_idxs = selection_reactive.get().xrange
+            y_idxs = selection_reactive.get().yrange
+            return f"X coords: {x_idxs} Y coords: {y_idxs}"
+
+    global global_roi_avgs_df
+    global global_roi_data_df
+    global_roi_avgs_df = pd.DataFrame()
+    global_roi_data_df = pd.DataFrame()
+
+    @render.data_frame
+    def selected_pixels():
+        asp_ratio = calc_asp_ratio()
+        global global_roi_avgs_df
+        global global_roi_data_df
+
+        if input.use_cor_mats() == True:
+            mats = ycf_cor_mats
+        else:
+            mats = global_mats 
+        elements = global_elements
+        if selection_reactive.get() is None:
+            empty_df = pd.DataFrame({"Message": ["No regions selected"]})
+            return empty_df
+        else:
+            if input.plotly_tool() == "lasso":
+                x_idxs = np.array(selection_reactive.get().xs) / asp_ratio
+                y_idxs = np.array(selection_reactive.get().ys)
+                rr, cc = polygon(y_idxs, x_idxs)
+                mat_shape = mats[elements[0]].shape
+                mask = np.zeros(mat_shape, dtype=bool)
+                mask[rr, cc] = True
+            elif input.plotly_tool() == "rectangle":
+                xmin = int(np.floor(np.min(selection_reactive.get().xrange) / asp_ratio))
+                xmax = int(np.ceil(np.max(selection_reactive.get().xrange) / asp_ratio))
+                ymin = int(np.floor(np.min(selection_reactive.get().yrange)))
+                ymax = int(np.ceil(np.max(selection_reactive.get().yrange)))
+                mat_shape = mats[elements[0]].shape
+                # Clip to ensure indices are within bounds
+                xmin = max(0, xmin)
+                xmax = min(mat_shape[1], xmax)
+                ymin = max(0, ymin)
+                ymax = min(mat_shape[0], ymax)
+                mask = np.zeros(mat_shape, dtype=bool)
+                mask[ymin:ymax, xmin:xmax] = True
+                # print("mat shape:", mats[element].shape, "mask shape:", mask.shape)
+
+            region_data = {}
+            region_data_dict = {}
+            region_means = {}
+            region_means["ROI"] = f"ROI{len(global_roi_avgs_df)}"
+            # region_means["x_idxs"] = x_idxs
+            # region_means["y_idxs"] = y_idxs
+            region_data["ROI"] = f"ROI{len(global_roi_avgs_df)}"
+            for element in elements:
+                if np.issubdtype(mats[element].dtype, np.number):
+                    region_data_el = mats[element][mask].flatten()
+                    
+                    # # Ensure region_data_el is numeric
+                    # try:
+                    #     region_data_el = np.asarray(region_data_el, dtype=np.float64)
+                    # except ValueError as e:
+                    #     print(f"ERROR: Non-numeric data in region_data_el for element {element}: {e}")
+                    #     continue
+
+                    # # Replace values <= 0 with np.nan
+                    # region_data_el = np.where(region_data_el <= 0, np.nan, region_data_el)
+
+                    # if region_data_el.size == 0 or np.all(np.isnan(region_data_el)):
+                    #     print(f"WARNING: No valid data for element {element} in the selected region.")
+                    #     continue
+
+                    region_data[element] = region_data_el.tolist()
+                    region_data_dict[element] = region_data_el
+                    valid_values = region_data_el[region_data_el > 0]
+                    if valid_values.size == 0:
+                        region_means[element] = np.nan
+                        region_means[f"{element}_1sd"] = np.nan
+                    else:
+                        region_means[element] = np.round(np.nanmean(valid_values), 2)
+                        region_means[f"{element}_1sd"] = np.round(np.nanstd(valid_values), 2)
+            if input.plotly_tool() == "lasso":
+                region_data["coords_x"] = x_idxs
+                region_data["coords_y"] = y_idxs
+            if input.plotly_tool() == "rectangle":
+                region_data["coords_x"] = [xmin, xmax]
+                region_data["coords_y"] = [ymin, ymax]   
+            
+            # Append the new row to the DataFrame
+            if region_means:
+                new_row = region_means                
+                df = pd.concat([global_roi_avgs_df, pd.DataFrame([new_row])], ignore_index=True)  # Append as a new row
+                global_roi_avgs_df = df
+                new_data_row = region_data
+                global_roi_data_df = pd.concat([global_roi_data_df, pd.DataFrame([new_data_row])], ignore_index=True)
+            else:
+                print("WARNING: No valid data to append to the DataFrame.")
+
+            return global_roi_avgs_df
+        
+    @render.download(filename = "roi_means.xlsx")
+    def download_ROI_means():
+        output = io.BytesIO()
+        global_roi_avgs_df.to_excel(output, index=False)
+        output.seek(0)
+        return output
+
+
+
+    @render_widget
     def plot():
         asp_ratio = calc_asp_ratio()
         selected_minerals = input.masked_map()
@@ -2289,58 +2903,166 @@ def server(input: Inputs, output: Outputs, session: Session):
                 mats = combined_maps               
 
         mat_ = mats[input.element()]
-        mat_nan = copy.deepcopy(mat_)
-        mat_nan[mat_nan<=0]=np.nan
-        mat = mat_nan
+        mat = copy.deepcopy(mat_)
+        mat[np.isnan(mat)]=0
+        mat[np.isinf(mat)]=0
         vmin_ = np.nanpercentile(mat, input.min_max_vals()[0])
         vmax_ = np.nanpercentile(mat, input.min_max_vals()[1])
-        ax = plt.axes()
-        ax.set_facecolor("black")
-        # ax = np.atleast_2d(ax)
-        # plt.rcParams["figure.figsize"] = (16,8)
-        if input.use_log() == True:
-            plt.imshow(mat, norm=colors.SymLogNorm(linthresh=0.001, vmin=vmin_, vmax=vmax_), cmap=input.c_map(),
-                       extent=[0, np.shape(mat)[1]*input.pixel_size()*asp_ratio, 0, np.shape(mat)[0]*input.pixel_size()], interpolation='none')
+        x_extent = np.linspace(0, input.pixel_size()*mat.shape[1]*asp_ratio, mat.shape[1])
+        y_extent = np.linspace(0, input.pixel_size()*mat.shape[0], mat.shape[0])
+        if input.c_map() == "batlow":
+            c_scale = batlow_plotly
         else:
-            plt.imshow(mat, vmin=vmin_, vmax=vmax_, cmap=input.c_map(),
-                       extent=[0, np.shape(mat)[1]*input.pixel_size()*asp_ratio, 0, np.shape(mat)[0]*input.pixel_size()], interpolation='none')
-        plt.title(input.element())
-        plt.colorbar(label=input.colorbar_label(),pad=0.01)
-        plt.xlabel("μm")
-        plt.ylabel("μm")
-        plt.grid(False)     
+            c_scale = input.c_map()
+        if input.use_log() == True:
+            mat_nan = copy.deepcopy(mat_)
+            mat_nan[mat_nan<=0]=np.nan
+            mat_log_nan = np.log10(mat_nan)
+            mat_log = copy.deepcopy(mat_log_nan)
+            print(f"min of mat_log: {np.nanmin(mat_log_nan)}")
+            if np.isnan(mat_log_nan).all():
+                mat_log = np.full_like(mat_log_nan, 0.0001)
+            else:
+                mat_log = copy.deepcopy(mat_log_nan)
+                mat_log[np.isnan(mat_log)]=np.nanmin(mat_log_nan)
+                mat_log[np.isinf(mat_log)]=np.nanmin(mat_log_nan)
+            vmin_log = np.nanpercentile(mat_log, input.min_max_vals()[0])
+            vmax_log = np.nanpercentile(mat_log, input.min_max_vals()[1])
+            fig = px.imshow(mat_log, x=x_extent, y=y_extent,
+                            range_color=[vmin_log, vmax_log],
+                            # color=np.log10(mat.flatten()), # Apply log10 to the color values
+                            color_continuous_scale=c_scale,  # Choose a colorscale (e.g., "Viridis", "Inferno", etc.)
+                            labels={"x": "μm", "y": "μm", "color": f"log {input.element()}"},
+                            origin="upper")
+        else:
+            fig = px.imshow(mat, x=x_extent, y=y_extent,
+                            range_color=[vmin_, vmax_],
+                            color_continuous_scale=c_scale,  # Choose a colorscale (e.g., "Viridis", "Inferno", etc.)
+                            labels={"x": "μm", "y": "μm", "color": input.element()},
+                            origin="upper")
+        # fig.update_yaxes(autorange='reversed')
+        w = go.FigureWidget(fig.data, fig.layout)
+        w._config = w._config | {"toImageButtonOptions": {'height': 1200, 'width': 1500,}}
+        return w
 
-    @render.text    
-    @reactive.event(input.save_fig)
-    def save_figure():
-        asp_ratio = calc_asp_ratio()
-        if input.masked_map() == "All":
-            mats = global_mats 
-        else:
-            mats = global_masked_mats[input.masked_map()]
-        mat_ = mats[input.element()]
-        mat_nan = copy.deepcopy(mat_)
-        mat_nan[mat_nan<=0]=np.nan
-        mat = mat_nan
-        vmin_ = np.nanpercentile(mat, input.min_max_vals()[0])
-        vmax_ = np.nanpercentile(mat, input.min_max_vals()[1])
-        ax = plt.axes()
-        ax.set_facecolor("black")
-        # ax = np.atleast_2d(ax)
-        # plt.rcParams["figure.figsize"] = (16,8)
-        if input.use_log() == True:
-            plt.imshow(mat, norm=colors.SymLogNorm(linthresh=0.001, vmin=vmin_, vmax=vmax_), cmap=input.c_map(),
-                       extent=[0, np.shape(mat)[1]*input.pixel_size()*asp_ratio, 0, np.shape(mat)[0]*input.pixel_size()], interpolation='none')
-        else:
-            plt.imshow(mat, vmin=vmin_, vmax=vmax_, cmap=input.c_map(),
-                       extent=[0, np.shape(mat)[1]*input.pixel_size()*asp_ratio, 0, np.shape(mat)[0]*input.pixel_size()], interpolation='none')
-        plt.title(input.element())
-        plt.colorbar(label=input.colorbar_label(),pad=0.01)
-        plt.xlabel("μm")
-        plt.ylabel("μm")
-        plt.grid(False)
-        plt.savefig("{}/{}.png".format(global_data_path, input.element()), dpi=300)
-        return "Your {} image has been saved.".format(input.element())
+
+        # fig, ax = plt.subplots()
+        # ax.set_facecolor("black")
+        # # ax = np.atleast_2d(ax)
+        # # plt.rcParams["figure.figsize"] = (16,8)
+        # if input.use_log() == True:
+        #     im = ax.imshow(mat, norm=colors.SymLogNorm(linthresh=0.001, vmin=vmin_, vmax=vmax_), cmap=input.c_map(),
+        #                 extent=[0, np.shape(mat)[1]*input.pixel_size()*asp_ratio, 0, np.shape(mat)[0]*input.pixel_size()], interpolation='none')
+        # else:
+        #     im = ax.imshow(mat, vmin=vmin_, vmax=vmax_, cmap=input.c_map(),
+        #                 extent=[0, np.shape(mat)[1]*input.pixel_size()*asp_ratio, 0, np.shape(mat)[0]*input.pixel_size()], interpolation='none')
+        # ax.set_title(input.element())
+        # # divider = make_axes_locatable(ax)
+        # # cax = divider.append_axes("right", size="5%", pad=0.01)
+        # fig.colorbar(im, pad=0.01, fraction=input.colorbar_fract())
+        # ax.set_xlabel("μm")
+        # ax.set_ylabel("μm")
+        # plt.grid(False)
+        # return fig
+
+        
+
+
+    # @render.plot
+    # def plot():
+    #     asp_ratio = calc_asp_ratio()
+    #     selected_minerals = input.masked_map()
+    #     if isinstance(selected_minerals, tuple):
+    #         selected_minerals = list(selected_minerals) 
+    #     if "All" in selected_minerals:
+    #         if input.use_cor_mats() == True:
+    #             mats = ycf_cor_mats
+    #         else:
+    #             mats = global_mats 
+    #     else:
+    #         if len(selected_minerals) == 1:
+    #             if input.use_cor_mats() == True:
+    #                 mats = ycf_cor_masked_mats[selected_minerals[0]]
+    #             else:
+    #                 mats = global_masked_mats[selected_minerals[0]]
+    #         else:
+    #             if input.use_cor_mats() == True:
+    #                 filtered_mats = {mineral: ycf_cor_masked_mats[mineral] for mineral in selected_minerals if mineral in ycf_cor_masked_mats}
+
+    #             else:
+    #                 filtered_mats = {mineral: global_masked_mats[mineral] for mineral in selected_minerals if mineral in global_masked_mats}
+
+    #             combined_maps = {}
+    #             elements = list(next(iter(filtered_mats.values())).keys())
+
+    #             # Combine the maps for each element
+    #             for elem in elements:
+    #                 combined = None
+    #                 for mineral, mat_dict in filtered_mats.items():
+    #                     if combined is None:
+    #                         combined = mat_dict[elem]  # Start with the first matrix
+    #                     else:
+    #                         combined = np.where(np.isnan(combined), mat_dict[elem], combined)  # Replace NaNs
+    #                 combined_maps[elem] = combined
+
+    #             mats = combined_maps               
+
+    #     mat_ = mats[input.element()]
+    #     mat_nan = copy.deepcopy(mat_)
+    #     mat_nan[mat_nan<=0]=np.nan
+    #     mat = mat_nan
+    #     vmin_ = np.nanpercentile(mat, input.min_max_vals()[0])
+    #     vmax_ = np.nanpercentile(mat, input.min_max_vals()[1])
+    #     fig, ax = plt.subplots()
+    #     ax.set_facecolor("black")
+    #     # ax = np.atleast_2d(ax)
+    #     # plt.rcParams["figure.figsize"] = (16,8)
+    #     if input.use_log() == True:
+    #         im = ax.imshow(mat, norm=colors.SymLogNorm(linthresh=0.001, vmin=vmin_, vmax=vmax_), cmap=input.c_map(),
+    #                    extent=[0, np.shape(mat)[1]*input.pixel_size()*asp_ratio, 0, np.shape(mat)[0]*input.pixel_size()], interpolation='none')
+    #     else:
+    #         im = ax.imshow(mat, vmin=vmin_, vmax=vmax_, cmap=input.c_map(),
+    #                    extent=[0, np.shape(mat)[1]*input.pixel_size()*asp_ratio, 0, np.shape(mat)[0]*input.pixel_size()], interpolation='none')
+    #     ax.set_title(input.element())
+    #     # divider = make_axes_locatable(ax)
+    #     # cax = divider.append_axes("right", size="5%", pad=0.01)
+    #     fig.colorbar(im, pad=0.01, fraction=input.colorbar_fract())
+    #     ax.set_xlabel("μm")
+    #     ax.set_ylabel("μm")
+    #     plt.grid(False)
+    #     return fig    
+
+    # @render.text    
+    # @reactive.event(input.save_fig)
+    # def save_figure():
+    #     asp_ratio = calc_asp_ratio()
+    #     if input.masked_map() == "All":
+    #         mats = global_mats 
+    #     else:
+    #         mats = global_masked_mats[input.masked_map()]
+    #     mat_ = mats[input.element()]
+    #     mat_nan = copy.deepcopy(mat_)
+    #     mat_nan[mat_nan<=0]=np.nan
+    #     mat = mat_nan
+    #     vmin_ = np.nanpercentile(mat, input.min_max_vals()[0])
+    #     vmax_ = np.nanpercentile(mat, input.min_max_vals()[1])
+    #     ax = plt.axes()
+    #     ax.set_facecolor("black")
+    #     # ax = np.atleast_2d(ax)
+    #     # plt.rcParams["figure.figsize"] = (16,8)
+    #     if input.use_log() == True:
+    #         plt.imshow(mat, norm=colors.SymLogNorm(linthresh=0.001, vmin=vmin_, vmax=vmax_), cmap=input.c_map(),
+    #                    extent=[0, np.shape(mat)[1]*input.pixel_size()*asp_ratio, 0, np.shape(mat)[0]*input.pixel_size()], interpolation='none')
+    #     else:
+    #         plt.imshow(mat, vmin=vmin_, vmax=vmax_, cmap=input.c_map(),
+    #                    extent=[0, np.shape(mat)[1]*input.pixel_size()*asp_ratio, 0, np.shape(mat)[0]*input.pixel_size()], interpolation='none')
+    #     plt.title(input.element())
+    #     plt.colorbar(label=input.colorbar_label(),pad=0.01)
+    #     plt.xlabel("μm")
+    #     plt.ylabel("μm")
+    #     plt.grid(False)
+    #     plt.savefig("{}/{}.png".format(global_data_path, input.element()), dpi=300)
+    #     return "Your {} image has been saved.".format(input.element())
     
 
     # @render.plot
@@ -2398,11 +3120,11 @@ def server(input: Inputs, output: Outputs, session: Session):
     #     ]
     #     ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.02, 1.0), fontsize=8, frameon=True)
     #     plt.tight_layout()
-        
 
-    @render.plot
+    @render_widget
     def plot_rgb():
         asp_ratio = calc_asp_ratio()
+        
         if input.masked_map_red() == "All":
             if input.use_cor_mats() == True:
                 mats_red = ycf_cor_mats
@@ -2413,7 +3135,16 @@ def server(input: Inputs, output: Outputs, session: Session):
                 mats_red = ycf_cor_masked_mats[input.masked_map_red()]
             else:
                 mats_red = global_masked_mats[input.masked_map_red()]
-        mat_red = mats_red[input.element_red()]
+        mat_red_ = mats_red[input.element_red()]
+        mat_red_[np.isnan(mat_red_)]=0
+        mat_red = copy.deepcopy(mat_red_)
+        vmin_red = np.nanpercentile(mat_red, input.min_max_vals_red()[0])
+        vmax_red = np.nanpercentile(mat_red, input.min_max_vals_red()[1])
+        mat_red[mat_red<vmin_red]=0
+        mat_red[mat_red>=vmax_red]=vmax_red
+        mat_red_norm = (mat_red/np.max(mat_red))*255
+        
+        
         if input.masked_map_green() == "All":
             if input.use_cor_mats() == True:
                 mats_green = ycf_cor_mats
@@ -2424,7 +3155,15 @@ def server(input: Inputs, output: Outputs, session: Session):
                 mats_green = ycf_cor_masked_mats[input.masked_map_green()]
             else:
                 mats_green = global_masked_mats[input.masked_map_green()]
-        mat_green = mats_green[input.element_green()]
+        mat_green_ = mats_green[input.element_green()]
+        mat_green_[np.isnan(mat_green_)]=0
+        mat_green = copy.deepcopy(mat_green_)
+        vmin_green = np.nanpercentile(mat_green, input.min_max_vals_green()[0])
+        vmax_green = np.nanpercentile(mat_green, input.min_max_vals_green()[1])
+        mat_green[mat_green<vmin_green]=0
+        mat_green[mat_green>=vmax_green]=vmax_green
+        mat_green_norm = (mat_green/np.max(mat_green))*255
+        
         if input.masked_map_blue() == "All":
             if input.use_cor_mats() == True:
                 mats_blue = ycf_cor_mats
@@ -2435,95 +3174,345 @@ def server(input: Inputs, output: Outputs, session: Session):
                 mats_blue = ycf_cor_masked_mats[input.masked_map_blue()]
             else:
                 mats_blue = global_masked_mats[input.masked_map_blue()]
-        mat_blue = mats_blue[input.element_blue()]
-        rgb = np.dstack((mat_red, mat_green, mat_blue))
-        vmin_red = np.nanpercentile(rgb[:,:,0], input.min_max_vals_red()[0])
-        vmax_red = np.nanpercentile(rgb[:,:,0], input.min_max_vals_red()[1])
-        img1 = channelnorm(rgb, 0, vmin_red, vmax_red)
-        vmin_green = np.nanpercentile(rgb[:,:,1], input.min_max_vals_green()[0])
-        vmax_green = np.nanpercentile(rgb[:,:,1], input.min_max_vals_green()[1])
-        img2 = channelnorm(img1, 1, vmin_green, vmax_green)
-        vmin_blue = np.nanpercentile(rgb[:,:,2], input.min_max_vals_blue()[0])
-        vmax_blue = np.nanpercentile(rgb[:,:,2], input.min_max_vals_blue()[1])
-        img3 = channelnorm(img2, 2, vmin_blue, vmax_blue)
-        ax = plt.axes()
-        ax.set_facecolor("black")
-        plt.imshow(img3, extent=[0, np.shape(img3)[1]*input.pixel_size()*asp_ratio, 0, np.shape(img3)[0]*input.pixel_size()], interpolation='none')
-        plt.grid(False)
-        plt.xlabel("μm")
-        plt.ylabel("μm")
-        # plt.title("Red: {}  Green: {}  Blue: {}".format(input.element_red(), input.element_green(), input.element_blue()))
-        # Add a legend for the RGB components
-        legend_elements = [
-            Patch(facecolor='red', edgecolor='none', label=f"{input.element_red()}_{input.masked_map_red()}"),
-            Patch(facecolor='green', edgecolor='none', label=f"{input.element_green()}_{input.masked_map_green()}"),
-            Patch(facecolor='blue', edgecolor='none', label=f"{input.element_blue()}_{input.masked_map_blue()}")]
-        ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.02, 1.0), fontsize=8, frameon=True)
-        plt.tight_layout()
+        mat_blue_ = mats_blue[input.element_blue()]
+        mat_blue_[np.isnan(mat_blue_)]=0
+        mat_blue = copy.deepcopy(mat_blue_)
+        vmin_blue = np.nanpercentile(mat_blue, input.min_max_vals_blue()[0])
+        vmax_blue = np.nanpercentile(mat_blue, input.min_max_vals_blue()[1])
+        mat_blue[mat_blue<vmin_blue]=0
+        mat_blue[mat_blue>=vmax_blue]=vmax_blue
+        mat_blue_norm = (mat_blue/np.max(mat_blue))*255
+        rgb = np.stack([mat_red_norm, mat_green_norm, mat_blue_norm], axis=-1)
+        x_extent = np.linspace(0, input.pixel_size()*rgb.shape[1]*asp_ratio, rgb.shape[1])
+        y_extent = np.linspace(0, input.pixel_size()*rgb.shape[0], rgb.shape[0])
 
-    @render.text    
-    @reactive.event(input.save_fig_rgb)
-    def save_figure_rgb():
-        asp_ratio = calc_asp_ratio()
-        if input.masked_map_red() == "All":
-            if input.use_cor_mats() == True:
-                mats_red = ycf_cor_mats
-            else:
-                mats_red = global_mats
-        else:
-            if input.use_cor_mats() == True:
-                mats_red = ycf_cor_masked_mats[input.masked_map_red()]
-            else:
-                mats_red = global_masked_mats[input.masked_map_red()]
-        mat_red = mats_red[input.element_red()]
-        if input.masked_map_green() == "All":
-            if input.use_cor_mats() == True:
-                mats_green = ycf_cor_mats
-            else:
-                mats_green = global_mats
-        else:
-            if input.use_cor_mats() == True:
-                mats_green = ycf_cor_masked_mats[input.masked_map_green()]
-            else:
-                mats_green = global_masked_mats[input.masked_map_green()]
-        mat_green = mats_green[input.element_green()]
-        if input.masked_map_blue() == "All":
-            if input.use_cor_mats() == True:
-                mats_blue = ycf_cor_mats
-            else:
-                mats_blue = global_mats
-        else:
-            if input.use_cor_mats() == True:
-                mats_blue = ycf_cor_masked_mats[input.masked_map_blue()]
-            else:
-                mats_blue = global_masked_mats[input.masked_map_blue()]
-        mat_blue = mats_blue[input.element_blue()]
-        rgb = np.dstack((mat_red, mat_green, mat_blue))
-        vmin_red = np.nanpercentile(rgb[:,:,0], input.min_max_vals_red()[0])
-        vmax_red = np.nanpercentile(rgb[:,:,0], input.min_max_vals_red()[1])
-        img1 = channelnorm(rgb, 0, vmin_red, vmax_red)
-        vmin_green = np.nanpercentile(rgb[:,:,1], input.min_max_vals_green()[0])
-        vmax_green = np.nanpercentile(rgb[:,:,1], input.min_max_vals_green()[1])
-        img2 = channelnorm(img1, 1, vmin_green, vmax_green)
-        vmin_blue = np.nanpercentile(rgb[:,:,2], input.min_max_vals_blue()[0])
-        vmax_blue = np.nanpercentile(rgb[:,:,2], input.min_max_vals_blue()[1])
-        img3 = channelnorm(img2, 2, vmin_blue, vmax_blue)
-        ax = plt.axes()
-        ax.set_facecolor("black")
-        plt.imshow(img3, extent=[0, np.shape(img3)[1]*input.pixel_size()*asp_ratio, 0, np.shape(img3)[0]*input.pixel_size()], interpolation='none')
-        plt.grid(False)
-        plt.xlabel("μm")
-        plt.ylabel("μm")
-        # plt.title("Red: {}  Green: {}  Blue: {}".format(input.element_red(), input.element_green(), input.element_blue()))
-        # Add a legend for the RGB components
-        legend_elements = [
-            Patch(facecolor='red', edgecolor='none', label=f"{input.element_red()}_{input.masked_map_red()}"),
-            Patch(facecolor='green', edgecolor='none', label=f"{input.element_green()}_{input.masked_map_green()}"),
-            Patch(facecolor='blue', edgecolor='none', label=f"{input.element_blue()}_{input.masked_map_blue()}")]
-        ax.legend(handles=legend_elements, loc='upper left',  bbox_to_anchor=(1.02, 1.0), fontsize=8, frameon=True)
-        plt.tight_layout()
-        plt.savefig("{}/{}_{}_{}.png".format(global_data_path, input.element_red(), input.element_green(), input.element_blue()), dpi=300)
-        return "Your {}_{}_{} rgb image has been saved.".format(input.element_red(), input.element_green(), input.element_blue())
+        fig = px.imshow(rgb, x=x_extent, y=y_extent, labels={"x": "μm", "y": "μm"})
+
+        w = go.FigureWidget(fig.data, fig.layout)
+        return w              
+
+        # img_main = rbg
+        # size = 150  # Size of the triangle image
+        # img_triangle = np.zeros((size, size, 3), dtype=np.uint8)
+
+        # p_red = np.array([size//2, 0])
+        # p_green = np.array([0, size-1])
+        # p_blue = np.array([size-1, size-1])
+
+        # for y in range(size):
+        #     for x in range(size):
+        #         v0 = p_green - p_red
+        #         v1 = p_blue - p_red
+        #         v2 = np.array([x, y]) - p_red
+
+        #         d00 = np.dot(v0, v0)
+        #         d01 = np.dot(v0, v1)
+        #         d11 = np.dot(v1, v1)
+        #         d20 = np.dot(v2, v0)
+        #         d21 = np.dot(v2, v1)
+
+        #         denom = d00 * d11 - d01 * d01
+        #         if denom == 0:
+        #             continue
+
+        #         v = (d11 * d20 - d01 * d21) / denom
+        #         w = (d00 * d21 - d01 * d20) / denom
+        #         u = 1 - v - w
+
+        #         if 0 <= u <= 1 and 0 <= v <= 1 and 0 <= w <= 1:
+        #             img_triangle[y, x] = (u * 255, v * 255, w * 255)
+
+        # # Step 2: Resize triangle to match img_main height     
+
+        # img_main_h = img_main.shape[0]
+        # img_main_w = img_main.shape[1]
+        # triangle_resized = np.array(
+        #     Image.fromarray(img_triangle.astype(np.uint8)).resize(
+        #         (size, img_main.shape[0] * size // img_triangle.shape[0])
+        #     )
+        # )
+
+        # main_scaled = np.array(
+        #     Image.fromarray(img_main.astype(np.uint8)).resize(
+        #         (img_main.shape[1] * size // img_main.shape[0], triangle_resized.shape[0])
+        #     )
+        # )
+        # # Step 4: Combine side by side
+        # combined = np.concatenate((main_scaled, triangle_resized), axis=1)
+
+        # # Step 5: Show using Plotly
+        # fig = px.imshow(combined)
+        # fig.update_layout(
+        #     title="Image with RGB Triangle Legend",
+        #     coloraxis_showscale=False,
+        #     xaxis=dict(showticklabels=False),
+        #     yaxis=dict(showticklabels=False)
+        # )
+
+
+        # fig = px.imshow(rgb)
+        # legend_colors = {
+        #     input.element_red(): 'rgb(255,0,0)',
+        #     input.element_green(): 'rgb(0,255,0)',
+        #     input.element_blue(): 'rgb(0,0,255)'
+        # }
+
+        # # Coordinates for the legend boxes
+        # x_start = np.shape(mat_red)[1] + 2
+        # y_start = 0
+
+        # for i, (label, color) in enumerate(legend_colors.items()):
+        #     fig.add_shape(
+        #         type="rect",
+        #         x0=x_start, x1=x_start + 10,
+        #         y0=y_start + i*(0.10*np.shape(mat_red)[0]), y1=y_start + i*(0.10*np.shape(mat_red)[0]) + 10,
+        #         fillcolor=color,
+        #         line=dict(width=1, color='black')
+        #     )
+        #     fig.add_annotation(
+        #         x=x_start + 12,
+        #         y=y_start + i*(0.10*np.shape(mat_red)[0]) + 5,
+        #         text=label,
+        #         showarrow=False,
+        #         font=dict(size=14),
+        #         xanchor='left',
+        #         yanchor='middle'
+        #     )
+
+        # fig.update_layout(plot_bgcolor="white")
+
+        # Adjust axis limits to fit legend
+        # fig.update_layout(
+        #     width=600,
+        #     height=300,
+        #     margin=dict(l=20, r=150),
+        #     xaxis=dict(range=[-0.5, 6]),
+        #     yaxis=dict(scaleanchor="x", range=[1.5, -0.5])  # to match image orientation
+        # )
+
+        
+
+    @render_widget
+    def rgb_legend():
+        size=350
+        img = np.zeros((size, size, 3), dtype=np.float32)*255
+
+        # Apexes of the triangle in (x, y)
+        p_red = np.array([size // 2, 0], dtype=np.float32)
+        p_green = np.array([0, size - 1], dtype=np.float32)
+        p_blue = np.array([size - 1, size - 1], dtype=np.float32)
+
+        # Meshgrid of pixel coordinates
+        X, Y = np.meshgrid(np.arange(size), np.arange(size))
+        P = np.stack((X, Y), axis=-1).astype(np.float32)
+
+        # Triangle edges
+        v0 = p_green - p_red
+        v1 = p_blue - p_red
+
+        d00 = np.dot(v0, v0)
+        d01 = np.dot(v0, v1)
+        d11 = np.dot(v1, v1)
+        denom = d00 * d11 - d01 * d01
+
+        v2 = P - p_red  # shape (H, W, 2)
+        d20 = v2[..., 0] * v0[0] + v2[..., 1] * v0[1]
+        d21 = v2[..., 0] * v1[0] + v2[..., 1] * v1[1]
+
+        v = (d11 * d20 - d01 * d21) / denom
+        w = (d00 * d21 - d01 * d20) / denom
+        u = 1.0 - v - w
+
+        # Mask inside triangle
+        mask = (u >= 0) & (v >= 0) & (w >= 0)
+
+        # Assign RGB values
+        img[mask, 0] = u[mask] * 255  # R
+        img[mask, 1] = v[mask] * 255  # G
+        img[mask, 2] = w[mask] * 255  # B
+
+        # Convert to uint8 for display
+        img_uint8 = img.astype(np.uint8)
+
+        # Plot
+        fig = px.imshow(img_uint8)
+        fig.update_layout(
+            width=350,
+            height=350,
+            plot_bgcolor="white",
+            margin=dict(l=0, r=0, t=0, b=0),
+            coloraxis_showscale=False,
+            xaxis=dict(showticklabels=False, showgrid=False),
+            yaxis=dict(showticklabels=False, showgrid=False, scaleanchor="x")
+        )
+
+        # Add labels
+        fig.add_annotation(x=p_red[0], y=p_red[1], text=input.element_red(), showarrow=False,
+                        font=dict(size=14, color="red"), yanchor="bottom", xanchor="center")
+        fig.add_annotation(x=p_green[0], y=p_green[1], text=input.element_green(), showarrow=False,
+                        font=dict(size=14, color="green"), yanchor="bottom", xanchor="right")
+        fig.add_annotation(x=p_blue[0], y=p_blue[1], text=input.element_blue(), showarrow=False,
+                        font=dict(size=14, color="blue"), yanchor="bottom", xanchor="left")
+
+        return fig
+
+
+
+
+
+
+        
+        # vmin_red = np.nanpercentile(rgb[:,:,0], input.min_max_vals_red()[0])
+        # vmax_red = np.nanpercentile(rgb[:,:,0], input.min_max_vals_red()[1])
+        # # img1 = channelnorm(rgb, 0, vmin_red, vmax_red)
+        # vmin_green = np.nanpercentile(rgb[:,:,1], input.min_max_vals_green()[0])
+        # vmax_green = np.nanpercentile(rgb[:,:,1], input.min_max_vals_green()[1])
+        # # img2 = channelnorm(img1, 1, vmin_green, vmax_green)
+        # vmin_blue = np.nanpercentile(rgb[:,:,2], input.min_max_vals_blue()[0])
+        # vmax_blue = np.nanpercentile(rgb[:,:,2], input.min_max_vals_blue()[1])
+        # # img3 = channelnorm(img2, 2, vmin_blue, vmax_blue)
+
+
+        # ax = plt.axes()
+        # ax.set_facecolor("black")
+        # plt.imshow(img3, extent=[0, np.shape(img3)[1]*input.pixel_size()*asp_ratio, 0, np.shape(img3)[0]*input.pixel_size()], interpolation='none')
+        # plt.grid(False)
+        # plt.xlabel("μm")
+        # plt.ylabel("μm")
+        # # plt.title("Red: {}  Green: {}  Blue: {}".format(input.element_red(), input.element_green(), input.element_blue()))
+        # # Add a legend for the RGB components
+        # legend_elements = [
+        #     Patch(facecolor='red', edgecolor='none', label=f"{input.element_red()}_{input.masked_map_red()}"),
+        #     Patch(facecolor='green', edgecolor='none', label=f"{input.element_green()}_{input.masked_map_green()}"),
+        #     Patch(facecolor='blue', edgecolor='none', label=f"{input.element_blue()}_{input.masked_map_blue()}")]
+        # ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.02, 1.0), fontsize=8, frameon=True)
+        # plt.tight_layout()
+        
+
+    # @render.plot
+    # def plot_rgb():
+    #     asp_ratio = calc_asp_ratio()
+    #     if input.masked_map_red() == "All":
+    #         if input.use_cor_mats() == True:
+    #             mats_red = ycf_cor_mats
+    #         else:
+    #             mats_red = global_mats
+    #     else:
+    #         if input.use_cor_mats() == True:
+    #             mats_red = ycf_cor_masked_mats[input.masked_map_red()]
+    #         else:
+    #             mats_red = global_masked_mats[input.masked_map_red()]
+    #     mat_red = mats_red[input.element_red()]
+    #     if input.masked_map_green() == "All":
+    #         if input.use_cor_mats() == True:
+    #             mats_green = ycf_cor_mats
+    #         else:
+    #             mats_green = global_mats
+    #     else:
+    #         if input.use_cor_mats() == True:
+    #             mats_green = ycf_cor_masked_mats[input.masked_map_green()]
+    #         else:
+    #             mats_green = global_masked_mats[input.masked_map_green()]
+    #     mat_green = mats_green[input.element_green()]
+    #     if input.masked_map_blue() == "All":
+    #         if input.use_cor_mats() == True:
+    #             mats_blue = ycf_cor_mats
+    #         else:
+    #             mats_blue = global_mats
+    #     else:
+    #         if input.use_cor_mats() == True:
+    #             mats_blue = ycf_cor_masked_mats[input.masked_map_blue()]
+    #         else:
+    #             mats_blue = global_masked_mats[input.masked_map_blue()]
+    #     mat_blue = mats_blue[input.element_blue()]
+    #     rgb = np.dstack((mat_red, mat_green, mat_blue))
+    #     vmin_red = np.nanpercentile(rgb[:,:,0], input.min_max_vals_red()[0])
+    #     vmax_red = np.nanpercentile(rgb[:,:,0], input.min_max_vals_red()[1])
+    #     img1 = channelnorm(rgb, 0, vmin_red, vmax_red)
+    #     vmin_green = np.nanpercentile(rgb[:,:,1], input.min_max_vals_green()[0])
+    #     vmax_green = np.nanpercentile(rgb[:,:,1], input.min_max_vals_green()[1])
+    #     img2 = channelnorm(img1, 1, vmin_green, vmax_green)
+    #     vmin_blue = np.nanpercentile(rgb[:,:,2], input.min_max_vals_blue()[0])
+    #     vmax_blue = np.nanpercentile(rgb[:,:,2], input.min_max_vals_blue()[1])
+    #     img3 = channelnorm(img2, 2, vmin_blue, vmax_blue)
+    #     ax = plt.axes()
+    #     ax.set_facecolor("black")
+    #     plt.imshow(img3, extent=[0, np.shape(img3)[1]*input.pixel_size()*asp_ratio, 0, np.shape(img3)[0]*input.pixel_size()], interpolation='none')
+    #     plt.grid(False)
+    #     plt.xlabel("μm")
+    #     plt.ylabel("μm")
+    #     # plt.title("Red: {}  Green: {}  Blue: {}".format(input.element_red(), input.element_green(), input.element_blue()))
+    #     # Add a legend for the RGB components
+    #     legend_elements = [
+    #         Patch(facecolor='red', edgecolor='none', label=f"{input.element_red()}_{input.masked_map_red()}"),
+    #         Patch(facecolor='green', edgecolor='none', label=f"{input.element_green()}_{input.masked_map_green()}"),
+    #         Patch(facecolor='blue', edgecolor='none', label=f"{input.element_blue()}_{input.masked_map_blue()}")]
+    #     ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.02, 1.0), fontsize=8, frameon=True)
+    #     plt.tight_layout()
+
+    # @render.text    
+    # @reactive.event(input.save_fig_rgb)
+    # def save_figure_rgb():
+    #     asp_ratio = calc_asp_ratio()
+    #     if input.masked_map_red() == "All":
+    #         if input.use_cor_mats() == True:
+    #             mats_red = ycf_cor_mats
+    #         else:
+    #             mats_red = global_mats
+    #     else:
+    #         if input.use_cor_mats() == True:
+    #             mats_red = ycf_cor_masked_mats[input.masked_map_red()]
+    #         else:
+    #             mats_red = global_masked_mats[input.masked_map_red()]
+    #     mat_red = mats_red[input.element_red()]
+    #     if input.masked_map_green() == "All":
+    #         if input.use_cor_mats() == True:
+    #             mats_green = ycf_cor_mats
+    #         else:
+    #             mats_green = global_mats
+    #     else:
+    #         if input.use_cor_mats() == True:
+    #             mats_green = ycf_cor_masked_mats[input.masked_map_green()]
+    #         else:
+    #             mats_green = global_masked_mats[input.masked_map_green()]
+    #     mat_green = mats_green[input.element_green()]
+    #     if input.masked_map_blue() == "All":
+    #         if input.use_cor_mats() == True:
+    #             mats_blue = ycf_cor_mats
+    #         else:
+    #             mats_blue = global_mats
+    #     else:
+    #         if input.use_cor_mats() == True:
+    #             mats_blue = ycf_cor_masked_mats[input.masked_map_blue()]
+    #         else:
+    #             mats_blue = global_masked_mats[input.masked_map_blue()]
+    #     mat_blue = mats_blue[input.element_blue()]
+    #     rgb = np.dstack((mat_red, mat_green, mat_blue))
+    #     vmin_red = np.nanpercentile(rgb[:,:,0], input.min_max_vals_red()[0])
+    #     vmax_red = np.nanpercentile(rgb[:,:,0], input.min_max_vals_red()[1])
+    #     img1 = channelnorm(rgb, 0, vmin_red, vmax_red)
+    #     vmin_green = np.nanpercentile(rgb[:,:,1], input.min_max_vals_green()[0])
+    #     vmax_green = np.nanpercentile(rgb[:,:,1], input.min_max_vals_green()[1])
+    #     img2 = channelnorm(img1, 1, vmin_green, vmax_green)
+    #     vmin_blue = np.nanpercentile(rgb[:,:,2], input.min_max_vals_blue()[0])
+    #     vmax_blue = np.nanpercentile(rgb[:,:,2], input.min_max_vals_blue()[1])
+    #     img3 = channelnorm(img2, 2, vmin_blue, vmax_blue)
+    #     ax = plt.axes()
+    #     ax.set_facecolor("black")
+    #     plt.imshow(img3, extent=[0, np.shape(img3)[1]*input.pixel_size()*asp_ratio, 0, np.shape(img3)[0]*input.pixel_size()], interpolation='none')
+    #     plt.grid(False)
+    #     plt.xlabel("μm")
+    #     plt.ylabel("μm")
+    #     # plt.title("Red: {}  Green: {}  Blue: {}".format(input.element_red(), input.element_green(), input.element_blue()))
+    #     # Add a legend for the RGB components
+    #     legend_elements = [
+    #         Patch(facecolor='red', edgecolor='none', label=f"{input.element_red()}_{input.masked_map_red()}"),
+    #         Patch(facecolor='green', edgecolor='none', label=f"{input.element_green()}_{input.masked_map_green()}"),
+    #         Patch(facecolor='blue', edgecolor='none', label=f"{input.element_blue()}_{input.masked_map_blue()}")]
+    #     ax.legend(handles=legend_elements, loc='upper left',  bbox_to_anchor=(1.02, 1.0), fontsize=8, frameon=True)
+    #     plt.tight_layout()
+    #     plt.savefig("{}/{}_{}_{}.png".format(global_data_path, input.element_red(), input.element_green(), input.element_blue()), dpi=300)
+    #     return "Your {}_{}_{} rgb image has been saved.".format(input.element_red(), input.element_green(), input.element_blue())
 
 
     
@@ -2532,7 +3521,7 @@ def server(input: Inputs, output: Outputs, session: Session):
     def plot_multi():
         return "Select the elements you want to plot and other plot parameters. Then click the 'Display Plot' button, and the multi-element plot will open in a new window."     
 
-    @render.plot
+    @render.image
     @reactive.event(input.disp_multi_plot)
     def plot_multi_disp():
         asp_ratio = calc_asp_ratio()
@@ -2558,8 +3547,12 @@ def server(input: Inputs, output: Outputs, session: Session):
         n_rows = math.ceil(len(elements_2_plot) / plots_per_row)
         n_cols = min(len(elements_2_plot), plots_per_row)
 
-        fig, axs = plt.subplots(n_rows, n_cols, figsize=fig_size, squeeze=False)
+        fig, axs = plt.subplots(n_rows, n_cols, figsize=fig_size)
         axs = np.atleast_2d(axs)  # Ensure axs is always a 2D array
+        # print(f"Figure size: {fig.get_size_inches()}")
+        # print(f"Number of subplots: {len(axs)}")
+
+        # plt.close()
 
         for idx, elem in enumerate(elements_2_plot):
             i, j = divmod(idx, plots_per_row)
@@ -2568,7 +3561,7 @@ def server(input: Inputs, output: Outputs, session: Session):
             vmax_ = np.nanpercentile(matrix, input.max_val_multi())
             ax = axs[i][j]
             if use_log:
-                im = ax.imshow(matrix, cmap=c_map, norm=colors.SymLogNorm(linthresh=0.001, vmin=vmin_, vmax=vmax_),
+                im = ax.imshow(matrix, cmap=c_map, norm=colors.SymLogNorm(linthresh=0.1, vmin=vmin_, vmax=vmax_),
                             extent=[0, np.shape(matrix)[1] * pixel_size * asp_ratio, 0, np.shape(matrix)[0] * pixel_size],
                             interpolation='none')
             else:
@@ -2577,11 +3570,17 @@ def server(input: Inputs, output: Outputs, session: Session):
                             interpolation='none')
             divider = make_axes_locatable(ax)
             cax = divider.append_axes('right', size='5%', pad=0.01)
-            fig.colorbar(im, cax=cax).set_label(label='ppm', rotation=90, size=8, labelpad=0.01)
-            ax.set_title(elem, size="small", pad=0.05)
-            ax.set_xlabel("μm", size="small", labelpad=0.01)
-            ax.set_ylabel("μm", size="small", labelpad=0.01)
+            cbar = fig.colorbar(im, cax=cax)
+            # cbar.set_label(label='ppm', rotation=90, labelpad=0.1, fontsize=4)
+            cbar.ax.tick_params(width=0, labelsize=4, pad=1) 
+            ax.set_title(elem, size=4, pad=0.05)
+            ax.set_xlabel("μm", size=4, labelpad=0.01)
+            ax.set_ylabel("μm", size=4, labelpad=0.01)
+            ax.xaxis.set_tick_params(width=0.1, labelsize=4, pad=1)
+            ax.yaxis.set_tick_params(width=0.1, labelsize=4, pad=1)
+            ax.set_facecolor("black")
             ax.grid(False)
+        print(f"Number of subplots: {len(axs)}")
 
         # Hide unused subplots
         for idx in range(len(elements_2_plot), n_rows * n_cols):
@@ -2589,7 +3588,26 @@ def server(input: Inputs, output: Outputs, session: Session):
             axs[i][j].axis('off')
 
         plt.tight_layout()
-        plt.show()
+        plt.savefig(f"{global_data_path}_multiplot.png", dpi=300)
+        plt.close()
+
+        img: ImgData = {"src": f"{global_data_path}_multiplot.png"}
+        return img
+
+        # img = io.imread(f"{global_data_path}_multiplot.png")
+        # fig = px.imshow(img)
+        # fig.update_layout(showlegend=False, xaxis=dict(visible=False), yaxis=dict(visible=False))
+        # w = go.FigureWidget(fig.data, fig.layout)
+        # return w
+
+        # fig = go.Figure()
+        # fig.add_layout_image(dict(source=f"{global_data_path}_multiplot.png"))
+        # fig.show()
+
+        
+        # img = plt.imread(f"{global_data_path}_multiplot.png")
+        # return img
+        # plt.show()
         # return fig
     
     
@@ -2747,13 +3765,15 @@ def server(input: Inputs, output: Outputs, session: Session):
     @render.plot
     @reactive.event(input.show_roi_means)
     def plot_roi_means():
-        df = pd.read_csv("{}/roi_means.txt".format(global_data_path), sep="\t")
+        df = global_roi_avgs_df
+        # df = pd.read_csv("{}/roi_means.txt".format(global_data_path), sep="\t")
         # df = pq.read_pandas("{}/roi_means.parquet".format(global_data_path)).to_pandas()
-        plt.errorbar(np.linspace(1, len(df), len(df)), df[input.element_roi()], yerr=df[f"{input.element_roi()}_std"], fmt='o', color='blue', markersize=5)
+        plt.errorbar(np.linspace(0, len(df)-1, len(df)), df[input.element_plotly()], yerr=df[f"{input.element_plotly()}_1sd"], 
+                     fmt='o', color='blue', markersize=5, capsize=5)
         plt.xlabel("ROI")
-        plt.xticks(np.arange(1, len(df) + 1, 1))
+        plt.xticks(np.arange(0, len(df), 1))
         plt.grid(False)
-        plt.ylabel(f"{input.element_roi()}")
+        plt.ylabel(f"{input.element_plotly()}")
 
     @render.text
     @reactive.event(input.roi_to_globals)
@@ -2889,6 +3909,147 @@ def server(input: Inputs, output: Outputs, session: Session):
 
         
         
+    @render.plot
+    def Pb_Pb_plot():
+        mats = global_mats
+
+        age = input.Pb_age()
+        mu_var = input.mu()        
+        kappa_var = input.kappa()
+        cps_206 = mats["CPS 206Pb"]
+        cps_207 = mats["CPS 207Pb"]
+        cps_208 = mats["CPS 208Pb"]
+        thresh = input.thresh_206cps()
+
+        safe_cps_206 = np.where((cps_206 <= 0) | np.isnan(cps_206) | np.isinf(cps_206), np.nan, cps_206)
+        
+        # Recalculate r76 each time using the current threshold
+        r76 = cps_207 / safe_cps_206
+        r76[safe_cps_206 < thresh] = np.nan
+        r76[np.isinf(r76)] = np.nan
+        print(f"7/6 ratio: {r76}")
+        # Repeat for r86 if needed
+        r86 = cps_208 / safe_cps_206
+        r86[safe_cps_206 < thresh] = np.nan
+        r86[np.isinf(r86)] = np.nan
+        print(f"8/6 ratio: {r86}")
+
+        data_x = np.nanmean(r76)
+        data_x_err = 2*np.nanstd(r76)/np.sqrt(np.count_nonzero(np.isnan(r76)))
+        data_y = np.nanmean(r86)
+        data_y_err = 2*np.nanstd(r86)/np.sqrt(np.count_nonzero(np.isnan(r86)))
+
+
+        lambda_238 = 0.000155125
+        lambda_235 = 0.00098485
+        lambda_232 = 0.000049475
+
+        mu_ac = 9.74
+        mu_uc = 10.5
+        mu_mnt = 9.0
+        kappa = 3.82
+
+        stg1_start_6_4 = 9.307
+        stg1_start_7_4 = 10.29
+        stg1_start_8_4 = 29.487
+
+        stg2_start_6_4 = 11.152
+        stg2_start_7_4 = 12.998
+        stg2_start_8_4 = 31.230
+
+        t1 = np.arange(3800,4600,100)
+        t1_start = np.array([4570])
+        t2a = np.arange(0,100, 25)
+        t2b = np.arange(100,1000,50)
+        t2c = np.arange(1000,3700,100)
+        t2 = np.concatenate([t2a, t2b, t2c])
+        t2_start = np.array([3700])
+        t1_all = np.concatenate([t1, t1_start])
+        t2_all = np.concatenate([t2a, t2b, t2c, t2_start])
+        t_stg1 = t1_all
+        t_stg2 = t2_all
+        t = np.concatenate([t_stg1, t_stg2])
+        t0_stg1 = np.ones(np.shape(t_stg1))*t1_start
+        t0_stg2 = np.ones(np.shape(t_stg2))*t2_start
+        t0 = np.concatenate([t0_stg1, t0_stg2])
+
+
+        def calc_SK_curve(mu, k):        
+            r640_stg1 = np.ones(np.shape(t0_stg1))*stg1_start_6_4
+            r740_stg1 = np.ones(np.shape(t0_stg1))*stg1_start_7_4
+            r840_stg1 = np.ones(np.shape(t0_stg1))*stg1_start_8_4
+            r640_stg2 = np.ones(np.shape(t0_stg2))*stg2_start_6_4
+            r740_stg2 = np.ones(np.shape(t0_stg2))*stg2_start_7_4
+            r840_stg2 = np.ones(np.shape(t0_stg2))*stg2_start_8_4
+            r640 = np.concatenate([r640_stg1, r640_stg2])
+            r740 = np.concatenate([r740_stg1, r740_stg2])
+            r840 = np.concatenate([r840_stg1, r840_stg2])
+
+            mu_stg1 = np.ones(np.shape(t_stg1))*7.192
+            mu_stg2 = np.ones(np.shape(t_stg2))*mu
+            mu_array = np.concatenate([mu_stg1, mu_stg2])
+            mu_35 = mu_array/137.818
+            mu_32_stg1 = np.ones(np.shape(t_stg1))*33
+            mu_32_stg2 = np.ones(np.shape(t_stg2))*mu*k
+            mu_32 = np.concatenate([mu_32_stg1, mu_32_stg2])
+
+            SK_curve_df = pd.DataFrame()
+            SK_curve_df["time (Ma)"] = t
+            # SK_curve_df["t0"] = t0
+            # SK_curve_df["mu"] = mu_array
+            # SK_curve_df["mu_35"] = mu_35
+            # SK_curve_df["mu_32"] = mu_32
+            SK_curve_df["206/204"] = r640 + mu_array*(np.exp(lambda_238*t0)-np.exp(lambda_238*t))
+            SK_curve_df["207/204"] = r740 + mu_35*(np.exp(lambda_235*t0)-np.exp(lambda_235*t))
+            SK_curve_df["208/204"] = r840 + mu_32*(np.exp(lambda_232*t0)-np.exp(lambda_232*t))
+            SK_curve_df["207/206"] = SK_curve_df["207/204"]/SK_curve_df["206/204"]
+            SK_curve_df["208/206"] = SK_curve_df["208/204"]/SK_curve_df["206/204"]
+            SK_curve_df_sorted = SK_curve_df.sort_values(by="time (Ma)", ascending = False)
+            return SK_curve_df_sorted
+
+        SK_curve_ac = calc_SK_curve(mu=mu_ac, k=kappa)
+        SK_curve_uc = calc_SK_curve(mu=mu_uc, k=kappa)
+        SK_curve_mnt = calc_SK_curve(mu=mu_mnt, k=kappa)
+        SK_curve_var = calc_SK_curve(mu=mu_var, k=kappa_var)
+        isochron_7_6_3700 = SK_curve_var["207/206"][SK_curve_var["time (Ma)"] == 3700].values[0]
+        isochron_8_6_3700 = SK_curve_var["208/206"][SK_curve_var["time (Ma)"] == 3700].values[0]
+        isochron_6_4_age = stg2_start_6_4 + mu_var*(np.exp(lambda_238*t2_start)-np.exp(lambda_238*age))
+        isochron_7_4_age = stg2_start_7_4 + mu_var/137.818*(np.exp(lambda_235*t2_start)-np.exp(lambda_235*age))
+        isochron_8_4_age = stg2_start_8_4 + mu_var*kappa_var*(np.exp(lambda_232*t2_start)-np.exp(lambda_232*age))
+        isochron_7_6_age = isochron_7_4_age/isochron_6_4_age
+        isochron_8_6_age = isochron_8_4_age/isochron_6_4_age
+        isochron_m = (isochron_8_6_3700 - isochron_8_6_age) / (isochron_7_6_3700 - isochron_7_6_age)
+        isochron_c = isochron_8_6_age - isochron_7_6_age * isochron_m
+        isochron_8_6_pt3 = np.array([0])
+        isochron_7_6_pt3 = (isochron_8_6_pt3 - isochron_c)/isochron_m
+        isochron_xs = np.array([np.array([isochron_7_6_3700]), isochron_7_6_age, isochron_7_6_pt3])
+        isochron_ys = np.array([np.array([isochron_8_6_3700]), isochron_8_6_age, isochron_8_6_pt3])
+
+        fig,ax = plt.subplots()
+        if input.show_mnt() == True:
+            ax.plot(SK_curve_mnt["207/206"], SK_curve_mnt["208/206"], ls="-.", label="SK75 Mantle", color="b", lw=1)
+        if input.show_ac() == True:
+            ax.plot(SK_curve_ac["207/206"], SK_curve_ac["208/206"], ls="-.", label="SK75 Avg Crust", color="g", lw=1)        
+        if input.show_uc() == True:
+            ax.plot(SK_curve_uc["207/206"], SK_curve_uc["208/206"], ls="-.", label="SK75 Upper Crust", color="r", lw=1)
+        ax.plot(SK_curve_var["207/206"][SK_curve_var["time (Ma)"]<=3700], SK_curve_var["208/206"][SK_curve_var["time (Ma)"]<=3700], color="C2", label=f"mu={mu_var}, kappa={kappa_var}")
+        
+        ax.plot(isochron_xs, isochron_ys, label=f"Isochron age = {age} Ma", marker="d", markersize= 10, color="k", ls="--", lw=1, markerfacecolor="none")
+        if input.show_map_mean() == True:
+            ax.errorbar(x=data_x, y=data_y, xerr=data_x_err, yerr=data_y_err, color="C4", label="Data")
+        if input.show_error_ellipse() == True:
+            confidence_ellipse(r76, r86, ax, n_std=input.n_std_Pb(), edgecolor='C4', lw=2)
+            # print(ellipse)
+            # ax.add_patch(ellipse)
+            # sns.kdeplot(np.array([r76.flatten(), r86.flatten()]), color="C4")
+        if input.show_all_Pb() == True:
+            ax.scatter(x=r76, y=r86, s=2, color="C4", alpha=0.5)
+        ax.legend()
+        if input.adjust_Pb_plot_lims() == True:
+            ax.set_xlim(input.Pb_plot_xlims()[0], input.Pb_plot_xlims()[1])
+            ax.set_ylim(input.Pb_plot_ylims()[0], input.Pb_plot_ylims()[1])
+        ax.set_xlabel("207Pb/206Pb")
+        ax.set_ylabel("208Pb/206Pb")
 
     
 
@@ -3919,7 +5080,7 @@ def server(input: Inputs, output: Outputs, session: Session):
         pca.fit(data_scaled)
         
         # Return explained variance ratio
-        explained_variance = pca.explained_variance_ratio_10000040
+        explained_variance = pca.explained_variance_ratio_
         return f"Explained Variance Ratio: {explained_variance}"
     
 
