@@ -386,7 +386,7 @@ def confidence_ellipse(x, y, ax, n_std=0.1, facecolor='none', **kwargs):
     return ax.add_patch(ellipse)                    
 
 
-app_ui = ui.page_fluid("CODES Laser Ablation Mapper v 0.1.0",
+app_ui = ui.page_fluid("CODES Laser Ablation Mapper v 0.1.1",
     ui.navset_tab(
         ui.nav_panel("Load Data",
                      ui.page_sidebar(
@@ -682,14 +682,16 @@ app_ui = ui.page_fluid("CODES Laser Ablation Mapper v 0.1.0",
                              ui.input_numeric("thresh_206cps", "Threshold for 206Pb CPS", 10000),                                                                                    
                              ui.input_checkbox("show_error_ellipse", "Show error ellipse of valid data?", value=True),
                              ui.input_numeric("n_std_Pb", "Sigma multiplier for error ellipse", value=0.1),
-                             ui.input_checkbox("show_map_mean", "Show mean and standard error of valid data?", value=True),
+                             ui.input_checkbox("show_map_mean", "Show median and standard error of all valid data?", value=True),
                              ui.input_checkbox("show_all_Pb", "Show all valid data points?", value=False),                             
-                             ui.input_checkbox("show_rois_Pb", "Show ROIs?", value = False)
+                             ui.input_checkbox("show_rois_Pb", "Show means and standard errors of ROIs?", value = False),
+                             ui.input_select("roi_selected_Pb", "Select ROIs to plot", choices=["None yet"], multiple=True),
                              ),
                         ui.row(
-                            ui.column(4, ui.input_checkbox("show_mnt", "Show SK75 Mantle?", value=True)),
-                            ui.column(4, ui.input_checkbox("show_ac", "Show SK75 Avg Crust?", value=True)),
-                            ui.column(4, ui.input_checkbox("show_uc", "Show SK75 Upper Crust?", value=True)),
+                            ui.column(3, ui.input_checkbox("show_mnt", "Show SK75 Mantle?", value=True)),
+                            ui.column(3, ui.input_checkbox("show_ac", "Show SK75 Avg Crust?", value=True)),
+                            ui.column(3, ui.input_checkbox("show_uc", "Show SK75 Upper Crust?", value=True)),
+                            ui.column(3, ui.input_checkbox("show_stage_1", "Show stage 1 model?", value=False)),
                             ),
                         ui.row(
                             ui.output_plot("Pb_Pb_plot")
@@ -703,7 +705,7 @@ app_ui = ui.page_fluid("CODES Laser Ablation Mapper v 0.1.0",
                                 ),
                             ui.column(
                                 6,
-                                ui.input_checkbox("adjust_Pb_plot_lims", "Adjust plot limits?", value=False),
+                                ui.input_checkbox("autoscale_Pb_plot", "Plot Full Scale?", value=False),
                                 ui.input_slider("Pb_plot_xlims", "Plot x limits", 0,2.5, value=[0.8, 1.2], step=0.01),
                                 ui.input_slider("Pb_plot_ylims", "Plot y limits", 0,4.5, value=[1.8, 3.2], step=0.01),
                                 ),
@@ -1915,8 +1917,9 @@ def server(input: Inputs, output: Outputs, session: Session):
     @reactive.effect
     def update_roi_selected():
         _, roi_list = make_roi_dict()
-        ui.update_select("roi_selected", choices=roi_list, selected="ROI1")
-        ui.update_select("roi_selected_decon", choices=roi_list, selected="ROI1")
+        ui.update_select("roi_selected", choices=roi_list, selected="ROI0")
+        ui.update_select("roi_selected_decon", choices=roi_list, selected="ROI0")
+        ui.update_select("roi_selected_Pb", choices=roi_list, selected="ROI0")
 
     @reactive.effect
     def update_line_selected():
@@ -2836,6 +2839,7 @@ def server(input: Inputs, output: Outputs, session: Session):
                     else:
                         region_means[element] = np.round(np.nanmean(valid_values), 2)
                         region_means[f"{element}_1sd"] = np.round(np.nanstd(valid_values), 2)
+            region_means["N"] = np.size(region_data[element])
             if input.plotly_tool() == "lasso":
                 region_data["coords_x"] = x_idxs
                 region_data["coords_y"] = y_idxs
@@ -3909,7 +3913,6 @@ def server(input: Inputs, output: Outputs, session: Session):
         return f"{line_list} were added to the global Lines dictionary for use in other processes."
 
         
-        
     @render.plot
     def Pb_Pb_plot():
         mats = global_mats
@@ -3917,7 +3920,7 @@ def server(input: Inputs, output: Outputs, session: Session):
         age = input.Pb_age()
         mu_var = input.mu()        
         kappa_var = input.kappa()
-        cps_206 = mats["CPS 206Pb"]
+        cps_206 = mats["CPS 206Pb"]  
         cps_207 = mats["CPS 207Pb"]
         cps_208 = mats["CPS 208Pb"]
         thresh = input.thresh_206cps()
@@ -3928,17 +3931,61 @@ def server(input: Inputs, output: Outputs, session: Session):
         r76 = cps_207 / safe_cps_206
         r76[safe_cps_206 < thresh] = np.nan
         r76[np.isinf(r76)] = np.nan
-        print(f"7/6 ratio: {r76}")
         # Repeat for r86 if needed
         r86 = cps_208 / safe_cps_206
         r86[safe_cps_206 < thresh] = np.nan
         r86[np.isinf(r86)] = np.nan
-        print(f"8/6 ratio: {r86}")
 
-        data_x = np.nanmean(r76)
+        data_x = np.nanmedian(r76)
         data_x_err = 2*np.nanstd(r76)/np.sqrt(np.count_nonzero(np.isnan(r76)))
-        data_y = np.nanmean(r86)
+        data_y = np.nanmedian(r86)
         data_y_err = 2*np.nanstd(r86)/np.sqrt(np.count_nonzero(np.isnan(r86)))
+
+        if input.show_rois_Pb() == True:
+            if input.roi_selected_Pb() == "None yet":
+                raise ValueError("No ROIs available.")
+            roi_data_x = {}
+            roi_data_y = {}
+            print(input.roi_selected_Pb())
+            for roi in input.roi_selected_Pb():
+                roi_line = global_roi_avgs_df[global_roi_avgs_df["ROI"] == roi]
+                roi_data_x[f"{roi}_mean"] = roi_line["CPS 207Pb"]/roi_line["CPS 206Pb"]
+                roi_data_x[f"{roi}_err"] = (np.sqrt((roi_line["CPS 207Pb_1sd"]/roi_line["CPS 207Pb"])**2 + (roi_line["CPS 206Pb_1sd"]/roi_line["CPS 206Pb"])**2)*roi_data_x[f"{roi}_mean"])/np.sqrt(roi_line["N"])
+                roi_data_y[f"{roi}_mean"] = roi_line["CPS 208Pb"]/roi_line["CPS 206Pb"]
+                roi_data_y[f"{roi}_err"] = (np.sqrt((roi_line["CPS 208Pb_1sd"]/roi_line["CPS 208Pb"])**2 + (roi_line["CPS 206Pb_1sd"]/roi_line["CPS 206Pb"])**2)*roi_data_y[f"{roi}_mean"])/np.sqrt(roi_line["N"])
+            # for i in range(len(input.roi_selected_Pb())):
+            #     roi_mask = global_roi_dict[input.roi_selected_Pb()[i]]
+            #     if "CPS 206Pb" not in roi_mask.keys():
+            #         raise ValueError(f"Pb isotope cps data not imported.")
+            #     else:
+
+            #         cps_206_roi = roi_mask["CPS 206Pb"]
+            #         cps_207_roi = roi_mask["CPS 207Pb"]
+            #         cps_208_roi = roi_mask["CPS 208Pb"]
+            #         thresh_roi = input.thresh_206cps()
+
+            #         safe_cps_206_roi = np.where((cps_206_roi <= 0) | np.isnan(cps_206_roi) | np.isinf(cps_206_roi), np.nan, cps_206_roi)
+            #         r76_roi = cps_207_roi / safe_cps_206_roi
+            #         r76_roi[safe_cps_206_roi < thresh_roi] = np.nan
+            #         r76_roi[np.isinf(r76_roi)] = np.nan
+            #         # Repeat for r86 if needed
+            #         r86_roi = cps_208_roi / safe_cps_206_roi
+            #         r86_roi[safe_cps_206_roi < thresh_roi] = np.nan
+            #         r86_roi[np.isinf(r86_roi)] = np.nan
+
+            #         roi_data_x[f"ROI{i}_data_x"] = r76_roi
+            #         roi_data_x[f"ROI{i}_data_x_mean"] = np.nanmean(r76_roi)
+            #         # roi_data_x[f"ROI{i}_data_x_err"] = 2*np.nanstd(r76_roi)/np.sqrt(np.count_nonzero(np.isnan(r86_roi)))
+            #         roi_data_y[f"ROI{i}_data_y"] = r86_roi
+            #         roi_data_y[f"ROI{i}_data_y_mean"] = np.nanmean(r86_roi)
+            #         # roi_data_y[f"ROI{i}_data_y_err"] = 2*np.nanstd(r86_roi)/np.sqrt(np.count_nonzero(np.isnan(r86_roi)))
+            #         n_valid = np.count_nonzero(~np.isnan(r86_roi))
+            #         if n_valid > 0:
+            #             roi_data_x[f"ROI{i}_data_x_err"] = 2 * np.nanstd(r76_roi) / np.sqrt(n_valid)
+            #             roi_data_y[f"ROI{i}_data_y_err"] = 2 * np.nanstd(r86_roi) / np.sqrt(n_valid)
+            #         else:
+            #             roi_data_x[f"ROI{i}_data_x_err"] = np.nan
+            #             roi_data_y[f"ROI{i}_data_y_err"] = np.nan
 
 
         lambda_238 = 0.000155125
@@ -4021,32 +4068,76 @@ def server(input: Inputs, output: Outputs, session: Session):
         isochron_8_6_age = isochron_8_4_age/isochron_6_4_age
         isochron_m = (isochron_8_6_3700 - isochron_8_6_age) / (isochron_7_6_3700 - isochron_7_6_age)
         isochron_c = isochron_8_6_age - isochron_7_6_age * isochron_m
-        isochron_8_6_pt3 = np.array([0])
+        if (data_y - data_y_err) >= 1.8:
+            isochron_8_6_pt3 = np.array([1.8])
+        else:
+            isochron_8_6_pt3 = np.array([(data_y - (3*data_y_err))])
         isochron_7_6_pt3 = (isochron_8_6_pt3 - isochron_c)/isochron_m
         isochron_xs = np.array([np.array([isochron_7_6_3700]), isochron_7_6_age, isochron_7_6_pt3])
         isochron_ys = np.array([np.array([isochron_8_6_3700]), isochron_8_6_age, isochron_8_6_pt3])
 
         fig,ax = plt.subplots()
+        ax.plot(SK_curve_var["207/206"][SK_curve_var["time (Ma)"]<=3700], SK_curve_var["208/206"][SK_curve_var["time (Ma)"]<=3700], color="g", label=f"mu={mu_var}, kappa={kappa_var}")
         if input.show_mnt() == True:
-            ax.plot(SK_curve_mnt["207/206"], SK_curve_mnt["208/206"], ls="-.", label="SK75 Mantle", color="b", lw=1)
+            ax.plot(SK_curve_mnt["207/206"][SK_curve_mnt["time (Ma)"]<=3700], SK_curve_mnt["208/206"][SK_curve_mnt["time (Ma)"]<=3700], ls=":", label="SK75 Mantle", color="gray", lw=1)
         if input.show_ac() == True:
-            ax.plot(SK_curve_ac["207/206"], SK_curve_ac["208/206"], ls="-.", label="SK75 Avg Crust", color="g", lw=1)        
+            ax.plot(SK_curve_ac["207/206"][SK_curve_ac["time (Ma)"]<=3700], SK_curve_ac["208/206"][SK_curve_ac["time (Ma)"]<=3700], ls="--", label="SK75 Avg Crust", color="k", lw=1)        
         if input.show_uc() == True:
-            ax.plot(SK_curve_uc["207/206"], SK_curve_uc["208/206"], ls="-.", label="SK75 Upper Crust", color="r", lw=1)
-        ax.plot(SK_curve_var["207/206"][SK_curve_var["time (Ma)"]<=3700], SK_curve_var["208/206"][SK_curve_var["time (Ma)"]<=3700], color="C2", label=f"mu={mu_var}, kappa={kappa_var}")
+            ax.plot(SK_curve_uc["207/206"][SK_curve_uc["time (Ma)"]<=3700], SK_curve_uc["208/206"][SK_curve_uc["time (Ma)"]<=3700], ls="-.", label="SK75 Upper Crust", color="gray", lw=1)
         
-        ax.plot(isochron_xs, isochron_ys, label=f"Isochron age = {age} Ma", marker="d", markersize= 10, color="k", ls="--", lw=1, markerfacecolor="none")
+        
+        if input.show_stage_1() == True:
+            ax.plot(SK_curve_var["207/206"][SK_curve_var["time (Ma)"]>3700], SK_curve_var["208/206"][SK_curve_var["time (Ma)"]>3700], color="g", label=f"mu={mu_var}, kappa={kappa_var}")
+            if input.show_mnt() == True:
+                ax.plot(SK_curve_mnt["207/206"][SK_curve_mnt["time (Ma)"]>3700], SK_curve_mnt["208/206"][SK_curve_mnt["time (Ma)"]>3700], ls=":", label="SK75 Mantle", color="gray", lw=1)
+            if input.show_uc() == True:
+                ax.plot(SK_curve_uc["207/206"][SK_curve_uc["time (Ma)"]>3700], SK_curve_uc["208/206"][SK_curve_uc["time (Ma)"]>3700], ls="-.", label="SK75 Upper Crust", color="gray", lw=1)            
+            ax.plot(SK_curve_ac["207/206"][SK_curve_ac["time (Ma)"]>3700], SK_curve_ac["208/206"][SK_curve_ac["time (Ma)"]>3700], ls="--", label="SK75 Avg Crust", color="k", lw=1)
+            
+
+        ax.plot(isochron_xs, isochron_ys, label=f"Isochron age = {age} Ma", marker="d", markersize= 10, color="b", ls="--", lw=1, markerfacecolor="none")
         if input.show_map_mean() == True:
-            ax.errorbar(x=data_x, y=data_y, xerr=data_x_err, yerr=data_y_err, color="C4", label="Data")
+            ax.errorbar(x=data_x, y=data_y, xerr=data_x_err, yerr=data_y_err, color="r", label="All Data")
         if input.show_error_ellipse() == True:
-            confidence_ellipse(r76, r86, ax, n_std=input.n_std_Pb(), edgecolor='C4', lw=2)
-            # print(ellipse)
-            # ax.add_patch(ellipse)
-            # sns.kdeplot(np.array([r76.flatten(), r86.flatten()]), color="C4")
+            confidence_ellipse(r76, r86, ax, n_std=input.n_std_Pb(), edgecolor='r', lw=2)
         if input.show_all_Pb() == True:
-            ax.scatter(x=r76, y=r86, s=2, color="C4", alpha=0.5)
+            ax.scatter(x=r76, y=r86, s=2, color="r", alpha=0.5)
+        if input.show_rois_Pb() == True:
+            for roi in input.roi_selected_Pb():
+                eb1 = ax.errorbar(
+                        x=roi_data_x[f"{roi}_mean"], y=roi_data_y[f"{roi}_mean"],
+                        xerr=roi_data_x[f"{roi}_err"], yerr=roi_data_y[f"{roi}_err"],
+                        label=f"{roi}")
+                eb1[-1][0].set_linestyle('--')
+                eb1[-1][0].set_linewidth(2)
+                eb1[-1][1].set_linestyle('--')
+                eb1[-1][1].set_linewidth(2)
+
+                # mean_x_key = f"{roi}_data_x_mean"
+                # mean_y_key = f"{roi}_data_y_mean"
+                # err_x_key = f"{roi}_data_x_err"
+                # err_y_key = f"{roi}_data_y_err"
+                # data_x_key = f"{roi}_data_x"
+                # data_y_key = f"{roi}_data_y"
+                # # Only plot if all keys exist and are not nan
+                # if (
+                #     mean_x_key in roi_data_x and mean_y_key in roi_data_y and
+                #     err_x_key in roi_data_x and err_y_key in roi_data_y and
+                #     data_x_key in roi_data_x and data_y_key in roi_data_y and
+                #     not np.isnan(roi_data_x[mean_x_key]) and not np.isnan(roi_data_y[mean_y_key])
+                # ):
+                #     ax.errorbar(
+                #         x=roi_data_x[mean_x_key], y=roi_data_y[mean_y_key],
+                #         xerr=roi_data_x[err_x_key], yerr=roi_data_y[err_y_key],
+                #         marker="o", label=f"{roi}"
+                #     )
+                #     confidence_ellipse(
+                #         roi_data_x[data_x_key], roi_data_y[data_y_key], ax, n_std=input.n_std_Pb(), lw=2
+                #     )
+                # else:
+                #     print(f"Skipping {roi}: missing or invalid data.")
         ax.legend()
-        if input.adjust_Pb_plot_lims() == True:
+        if input.autoscale_Pb_plot() == False:
             ax.set_xlim(input.Pb_plot_xlims()[0], input.Pb_plot_xlims()[1])
             ax.set_ylim(input.Pb_plot_ylims()[0], input.Pb_plot_ylims()[1])
         ax.set_xlabel("207Pb/206Pb")
