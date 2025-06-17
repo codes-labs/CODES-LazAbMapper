@@ -1,4 +1,4 @@
-# This is version 0.2.0 beta
+# version 0.2.0 beta
 
 import numpy as np
 import pandas as pd
@@ -2569,16 +2569,18 @@ def server(input: Inputs, output: Outputs, session: Session):
             fig, axs = plt.subplots(3,1, sharex=True)
             if input.class_type() == "Library Matching":
                 unique_min_no = np.unique(mats["numeric_max_key"])
+                mat_shape = np.shape(mats["numeric_max_key"])
             if input.class_type() == "KMeans Classification":
                 unique_min_no = np.unique(mats["kmeans"])
+                mat_shape = np.shape(mats["kmeans"])
             min_no_mapping = {num_key: i for i, num_key in enumerate(unique_min_no)}
             if input.class_type() == "Library Matching":
                 min_no_mat = np.vectorize(min_no_mapping.get)(mats["numeric_max_key"])
             if input.class_type() == "KMeans Classification":
                 min_no_mat = np.vectorize(min_no_mapping.get)(mats["kmeans"])
             row_no = (np.shape(min_no_mat)[0]-1) - input.row_number()
-            print(row_no)
-            x_var = np.linspace(0, np.shape(mats["numeric_max_key"])[1]*asp_ratio, np.shape(mats["numeric_max_key"])[1])
+            print(row_no)            
+            x_var = np.linspace(0, mat_shape[1]*asp_ratio, mat_shape[1])
             axs[0].plot(x_var, min_no_mat[row_no], c="r")
             axs[0].set_ylabel("Mineral No.")
             axs[0].invert_yaxis()
