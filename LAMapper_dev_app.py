@@ -1,4 +1,4 @@
-# version 0.2.0 beta
+# version 0.2.1 beta
 
 import numpy as np
 import pandas as pd
