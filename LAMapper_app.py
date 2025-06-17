@@ -1,3 +1,5 @@
+# This is version 0.2.0 beta
+
 import numpy as np
 import pandas as pd
 import matplotlib
