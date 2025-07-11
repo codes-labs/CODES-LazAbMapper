@@ -2623,7 +2623,9 @@ def server(input: Inputs, output: Outputs, session: Session):
         ycf_cor_mats = {}
         for elem in loaded_elements:
             if elem not in non_elemental_elements:
-                ycf_cor_mats[elem] = mats[elem]/yield_cor_fact
+                arr1 = mats[elem]/yield_cor_fact
+                arr1[np.isinf(arr1)] = 0
+                ycf_cor_mats[elem] = arr1
         for elem in non_elemental_elements:
                 if elem in mats.keys():
                     ycf_cor_mats[elem] = mats[elem]
@@ -2633,6 +2635,10 @@ def server(input: Inputs, output: Outputs, session: Session):
         ycf_cor_masked_mats = {}
         for mineral in mineral_list:
             ycf_cor_masked_mats[mineral] = {elem: masked_mats[mineral][elem]/yield_cor_fact for elem in loaded_elements if elem not in non_elemental_elements}
+            for elem in ycf_cor_masked_mats[mineral]:
+                arr = ycf_cor_masked_mats[mineral][elem]
+                arr[np.isinf(arr)] = 0
+                ycf_cor_masked_mats[mineral][elem] = arr
 
         cor_data_means_dict = {}
         for mineral in mineral_list:
