@@ -2710,6 +2710,9 @@ def server(input: Inputs, output: Outputs, session: Session):
         for elem in elements:
             data_cube_df[elem] = mats[elem].reshape(-1)
 
+        # print("YCF Global: {}".format(ycf_global.reshape(-1)))
+        data_cube_df["yield cor fact"] = ycf_global.reshape(-1)
+
         data_cube_df.to_csv(output, index=False)
         output.seek(0)
         return output
