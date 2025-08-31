@@ -51,6 +51,7 @@ import matplotlib.transforms as transforms # type: ignore
 from matplotlib.patches import Ellipse # type: ignore
 import numpy.ma as ma # type: ignore
 import cv2 # type: ignore
+from scipy.ndimage import uniform_filter1d # type: ignore
 
 # from shiny.types import ImgData
 
@@ -510,6 +511,7 @@ app_ui = ui.page_fluid("CODES Laser Ablation Mapper v 0.2.1 beta",
                              ui.input_numeric("row_number","Row Number for Line Plot", 0),
                              # ui.input_numeric("col_min", "Enter the minimum column index", 0),
                              # ui.input_numeric("col_max", "Enter the maximum column index", -1),
+                             ui.input_select("ycf_smoothing_fact", "Yield Correction Smoothing Factor", choices=[1, 3, 5], selected=1), 
                              ui.input_action_button("perf_yield_cor", "Apply Yield Correction"),
                              ui.input_checkbox("use_cor_mats", "Use yield corrected values for all maps?", value=False),                             
                              ui.download_button("download_yc_means", "Download Yield Corrected Means"),
@@ -2538,9 +2540,15 @@ def server(input: Inputs, output: Outputs, session: Session):
                 unclassified_mask = (max_keys == "Unclassified")
                 std_totals_max[unclassified_mask] = mat_total[unclassified_mask]/10000
 
-            yield_cor_fact = (mat_total/10000)/std_totals_max
+            ycf_ini = (mat_total/10000)/std_totals_max
+
             if "Unclassified" in max_keys:
-                yield_cor_fact[max_keys == "Unclassified"] = 1
+                ycf_ini[max_keys == "Unclassified"] = 1
+
+            if input.ycf_smoothing_fact() == "1":
+                yield_cor_fact = ycf_ini
+            else:
+                yield_cor_fact = uniform_filter1d(ycf_ini, size=int(input.ycf_smoothing_fact()), axis=1, mode='nearest')            
 
             # yield_cor_fact = np.where(yield_cor_fact == 0, np.nan, yield_cor_fact)
             
@@ -2590,6 +2598,7 @@ def server(input: Inputs, output: Outputs, session: Session):
             axs[2].set_ylabel("Yield CF")
 
     @render.plot
+    @reactive.event(input.perf_yield_cor)
     def ycf_plot():
         asp_ratio = calc_asp_ratio()
         plt.imshow(ycf_global,
