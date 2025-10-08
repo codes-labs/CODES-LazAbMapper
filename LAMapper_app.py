@@ -1,4 +1,4 @@
-# LA Mapper version 0.2.0 beta
+# LA Mapper version 0.3.0 beta
 
 import numpy as np
 import pandas as pd
