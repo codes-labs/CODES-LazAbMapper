@@ -52,6 +52,7 @@ from matplotlib.patches import Ellipse # type: ignore
 import numpy.ma as ma # type: ignore
 import cv2 # type: ignore
 from scipy.ndimage import uniform_filter1d # type: ignore
+import re
 
 # from shiny.types import ImgData
 
@@ -352,6 +353,16 @@ elements_all = ['23Na','24Mg','27Al','29Si','31P','34S','35Cl','39K','43Ca','44C
 
 cmaps = ["cmc.batlow", "parula", "inferno", "plasma", "viridis", "nipy_spectral", "turbo", "Reds", "Greens", "Blues"]
 
+def format_elem_isotope(col):
+    match = re.match(r"^(\d+)([A-Za-z]+)(_ppm)$", col)
+    match_cps = re.match(r"^(CPS )(\d+)([A-Za-z]+)$", col)
+    if match:
+        return f"{match.group(2)}{match.group(1)}{match.group(3)}"
+    elif match_cps:
+        return f"{match_cps.group(3)}{match_cps.group(2)}_cps"
+    else:
+        return col
+
 
 def channelnorm(im, channel, vmin, vmax):
     im_copy = copy.deepcopy(im)
@@ -410,6 +421,7 @@ app_ui = ui.page_fluid("CODES Laser Ablation Mapper v 0.2.1 beta",
                             ui.markdown("Input scan speed and sweep time to calculate aspect ratio:"),
                             ui.input_numeric("scan_speed", "Scan speed (μm/s)", 9.0),
                             ui.input_numeric("sweep_time", "Total sweep time (ms) (343 for pyrite)", 343),
+                            ui.input_checkbox("rename_dc_cols", "Change column names to element-isotope format (e.g., 43Ca to Ca43)", value=False),
                             ui.download_button("data_cube_export", "Export maps as a data cube"),
                             ),
                         ui.output_text("done_text", inline=True),
@@ -515,6 +527,7 @@ app_ui = ui.page_fluid("CODES Laser Ablation Mapper v 0.2.1 beta",
                              ui.input_action_button("perf_yield_cor", "Apply Yield Correction"),
                              ui.input_checkbox("use_cor_mats", "Use yield corrected values for all maps?", value=False),                             
                              ui.download_button("download_yc_means", "Download Yield Corrected Means"),
+                             ui.input_checkbox("rename_yc_dc_cols", "Change column names to element-isotope format (e.g., 43Ca to Ca43)", value=False),
                              ui.download_button("download_yc_cube", "Download yield corrected data as a data cube."),
                             ),
                          ui.output_plot("yield_cor_plot"),
@@ -1046,7 +1059,8 @@ def server(input: Inputs, output: Outputs, session: Session):
                         print(f"Skipping non-numeric element: {el}")
                         continue
                     region_data[el] = ((mats_roi[el][y1:y2, x1:x2]).flatten()).tolist()
-                    region_means[el] = np.nanmean(mats_roi[el][y1:y2, x1:x2])
+                    region_means[el] = np.nanmean(np.where(mats_roi[el][y1:y2, x1:x2] <= 0, np.nan, mats_roi[el][y1:y2, x1:x2]))
+                    # region_means[el] = np.nanmean(mats_roi[el][y1:y2, x1:x2])
                     region_means[f"{el}_std"] = np.nanstd(mats_roi[el][y1:y2, x1:x2])                
                 selected_regions.append(region_means)  # Add the region to the list                
                 selected_data.append(region_data)
@@ -1114,8 +1128,9 @@ def server(input: Inputs, output: Outputs, session: Session):
                     # Extract the pixel values within the polygon
                     mask = np.zeros(data.shape, dtype=bool)
                     mask[rr, cc] = True
-                    region_data[el] = (((mats_roi[el][mask])).flatten()).tolist()
-                    region_means[el] = np.nanmean(mats_roi[el][mask])
+                    region_data[el] = (((mats_roi[el][mask])).flatten()).tolist()                    
+                    region_means[el] = np.nanmean(np.where(mats_roi[el][mask] <= 0, np.nan, mats_roi[el][mask]))
+                    # region_means[el] = np.nanmean(mats_roi[el][mask])
                     region_means[f"{el}_std"] = np.nanstd(mats_roi[el][mask])
                 selected_regions.append(region_means)  # Add the region to the list
                 selected_data.append(region_data)
@@ -2156,8 +2171,17 @@ def server(input: Inputs, output: Outputs, session: Session):
 
         # elements_sorted = sorted(elements, key=leading_number)
         for elem in elements:
-            data_cube_df[elem] = mats[elem].reshape(-1)
+            col_data = mats[elem].reshape(-1)
 
+            # Create the column in the DataFrame
+            data_cube_df[elem] = col_data
+
+            # Apply numeric filtering only if dtype is numeric
+            if np.issubdtype(np.array(col_data).dtype, np.number):
+                data_cube_df[elem] = data_cube_df[elem].where(data_cube_df[elem] > 0, np.nan)
+
+        if input.rename_dc_cols() == True:
+            data_cube_df.rename(columns={col: format_elem_isotope(col) for col in data_cube_df.columns}, inplace=True)
         data_cube_df.to_csv(output, index=False)
         output.seek(0)
         return output
@@ -2392,6 +2416,7 @@ def server(input: Inputs, output: Outputs, session: Session):
 
         # Get unique clusters
         unique_clusters = np.unique(cluster_labels)
+        cluster_pixel_counts = {cluster: np.sum(cluster_labels == cluster) for cluster in unique_clusters}
 
         # Initialize a dictionary to store results
         cluster_averages = {"Cluster": [], "Mineral Name": []}
@@ -2418,6 +2443,8 @@ def server(input: Inputs, output: Outputs, session: Session):
             cluster_averages["Mineral Name"][-1] = "Unclassified"
         # Convert to a pandas DataFrame
         df = pd.DataFrame(cluster_averages)
+        df["Pixel Count"] = df["Cluster"].map(cluster_pixel_counts)
+        df["Pixel %"] = df["Cluster"].map(cluster_pixel_counts) / sum(cluster_pixel_counts.values()) *100
         global global_cluster_means_df
         global_cluster_means_df = df
 
@@ -2716,11 +2743,25 @@ def server(input: Inputs, output: Outputs, session: Session):
             return int(num)
 
         # elements_sorted = sorted(elements, key=leading_number)
+        non_elemental_elements_2 = ["kmeans", "comp_cats", "mineral", "mineral_names", "numeric_max_key", "mat_total", "max_indices", "max_percent_match"]
         for elem in elements:
-            data_cube_df[elem] = mats[elem].reshape(-1)
+            col_data = mats[elem].reshape(-1)
+
+            # Create the column in the DataFrame
+            data_cube_df[elem] = col_data
+
+            # Apply numeric filtering only if dtype is numeric
+            if elem in non_elemental_elements_2:
+                data_cube_df[elem] = data_cube_df[elem]
+            else:
+                if np.issubdtype(np.array(col_data).dtype, np.number):
+                    data_cube_df[elem] = data_cube_df[elem].where(data_cube_df[elem] > 0, np.nan)
 
         # print("YCF Global: {}".format(ycf_global.reshape(-1)))
         data_cube_df["yield cor fact"] = ycf_global.reshape(-1)
+
+        if input.rename_yc_dc_cols() == True:
+            data_cube_df.rename(columns={col: format_elem_isotope(col) for col in data_cube_df.columns}, inplace=True)
 
         data_cube_df.to_csv(output, index=False)
         output.seek(0)
