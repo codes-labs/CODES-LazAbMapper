@@ -1,4 +1,4 @@
-# LA Mapper version 0.2.0 beta
+# LA Mapper version 0.3.0 beta
 
 import numpy as np
 import pandas as pd
@@ -2181,6 +2181,7 @@ def server(input: Inputs, output: Outputs, session: Session):
                 data_cube_df[elem] = data_cube_df[elem].where(data_cube_df[elem] > 0, np.nan)
 
         if input.rename_dc_cols() == True:
+            data_cube_df.rename(columns={"x_coord": "x", "y_coord": "y"}, inplace=True)
             data_cube_df.rename(columns={col: format_elem_isotope(col) for col in data_cube_df.columns}, inplace=True)
         data_cube_df.to_csv(output, index=False)
         output.seek(0)
@@ -2761,6 +2762,7 @@ def server(input: Inputs, output: Outputs, session: Session):
         data_cube_df["yield cor fact"] = ycf_global.reshape(-1)
 
         if input.rename_yc_dc_cols() == True:
+            data_cube_df.rename(columns={"x_coord": "x", "y_coord": "y"}, inplace=True)
             data_cube_df.rename(columns={col: format_elem_isotope(col) for col in data_cube_df.columns}, inplace=True)
 
         data_cube_df.to_csv(output, index=False)
