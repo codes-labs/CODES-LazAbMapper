@@ -1,4 +1,4 @@
-# LA Mapper version 0.3.0 beta
+# LA Mapper version 0.3.1 beta
 
 import numpy as np
 import pandas as pd
@@ -403,7 +403,7 @@ def confidence_ellipse(x, y, ax, n_std=0.1, facecolor='none', **kwargs):
     return ax.add_patch(ellipse)                    
 
 
-app_ui = ui.page_fluid("CODES Laser Ablation Mapper v 0.3.0 beta",
+app_ui = ui.page_fluid("CODES Laser Ablation Mapper v 0.3.1 beta",
     ui.navset_tab(
         ui.nav_panel("Load Data",
                      ui.page_sidebar(
