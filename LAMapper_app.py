@@ -2179,6 +2179,8 @@ def server(input: Inputs, output: Outputs, session: Session):
             # Apply numeric filtering only if dtype is numeric
             if np.issubdtype(np.array(col_data).dtype, np.number):
                 data_cube_df[elem] = data_cube_df[elem].where(data_cube_df[elem] > 0, np.nan)
+            data_cube_df[elem] = pd.to_numeric(col_data, errors="coerce")
+            data_cube_df.loc[data_cube_df[elem] <= 0, elem] = np.nan
 
         if input.rename_dc_cols() == True:
             data_cube_df.rename(columns={"x_coord": "x", "y_coord": "y"}, inplace=True)
@@ -2757,7 +2759,8 @@ def server(input: Inputs, output: Outputs, session: Session):
             else:
                 if np.issubdtype(np.array(col_data).dtype, np.number):
                     data_cube_df[elem] = data_cube_df[elem].where(data_cube_df[elem] > 0, np.nan)
-
+                data_cube_df[elem] = pd.to_numeric(col_data, errors="coerce")
+                data_cube_df.loc[data_cube_df[elem] <= 0, elem] = np.nan
         # print("YCF Global: {}".format(ycf_global.reshape(-1)))
         data_cube_df["yield cor fact"] = ycf_global.reshape(-1)
 
